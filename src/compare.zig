@@ -114,7 +114,17 @@ pub const Report = struct {
     }
 
     /// Like `add`, and marks the path as holding a real difference in this record.
-    fn addDirty(self: *Report, severity: ?Severity, kind: Kind, path: []const u8, key: []const u8, name: []const u8, id: []const u8, a: []const u8, b: []const u8) !void {
+    fn addDirty(
+        self: *Report,
+        severity: ?Severity,
+        kind: Kind,
+        path: []const u8,
+        key: []const u8,
+        name: []const u8,
+        id: []const u8,
+        a: []const u8,
+        b: []const u8,
+    ) !void {
         try self.dirty.append(self.allocator, path);
         try self.add(severity, kind, path, key, name, id, a, b);
     }
@@ -252,13 +262,27 @@ pub const Collector = struct {
             .cv => |param| {
                 const key = if (param.accession) |accession| accession.raw else param.name orelse continue;
                 if (self.rules.severity(key) == .ignored) continue;
-                try self.facts.append(self.arena, makeFact(path, key, param.name orelse "", param.value orelse "", unitOf(param.unit), element));
+                try self.facts.append(self.arena, makeFact(
+                    path,
+                    key,
+                    param.name orelse "",
+                    param.value orelse "",
+                    unitOf(param.unit),
+                    element,
+                ));
             },
             .user => |param| {
                 const name = param.name orelse continue;
                 const key = try std.fmt.allocPrint(self.arena, "user:{s}", .{name});
                 if (self.rules.severity(key) == .ignored) continue;
-                try self.facts.append(self.arena, makeFact(path, key, name, param.value orelse "", unitOf(param.unit), element));
+                try self.facts.append(self.arena, makeFact(
+                    path,
+                    key,
+                    name,
+                    param.value orelse "",
+                    unitOf(param.unit),
+                    element,
+                ));
             },
             .group_ref => {},
         };
@@ -392,7 +416,16 @@ fn diffGroup(report: *Report, id: []const u8, a: []const Fact, b: []const Fact) 
     if (a.len != b.len) {
         var ta: [32]u8 = undefined;
         var tb: [32]u8 = undefined;
-        try report.addDirty(null, .count, first.path, first.key, first.name, id, std.fmt.bufPrint(&ta, "{d} of them", .{a.len}) catch "", std.fmt.bufPrint(&tb, "{d} of them", .{b.len}) catch "");
+        try report.addDirty(
+            null,
+            .count,
+            first.path,
+            first.key,
+            first.name,
+            id,
+            std.fmt.bufPrint(&ta, "{d} of them", .{a.len}) catch "",
+            std.fmt.bufPrint(&tb, "{d} of them", .{b.len}) catch "",
+        );
         return;
     }
     for (a, b) |x, y| {
@@ -517,7 +550,16 @@ pub fn diffGrouping(
         if (count_a != count_b) {
             var ta: [32]u8 = undefined;
             var tb: [32]u8 = undefined;
-            try report.addDirty(null, .count, element.path, "element", "", id, std.fmt.bufPrint(&ta, "{d} of them", .{count_a}) catch "", std.fmt.bufPrint(&tb, "{d} of them", .{count_b}) catch "");
+            try report.addDirty(
+                null,
+                .count,
+                element.path,
+                "element",
+                "",
+                id,
+                std.fmt.bufPrint(&ta, "{d} of them", .{count_a}) catch "",
+                std.fmt.bufPrint(&tb, "{d} of them", .{count_b}) catch "",
+            );
             continue;
         }
         const groups_a = try subtrees(scratch, a, elements_a, element.path, count_a);
@@ -569,7 +611,13 @@ fn isDirty(report: *const Report, path: []const u8) bool {
 }
 
 // The facts under each element at `path`, in the order the facts are sorted.
-fn subtrees(scratch: std.mem.Allocator, facts: []const Fact, elements: []const Element, path: []const u8, count: usize) ![]std.ArrayList(Fact) {
+fn subtrees(
+    scratch: std.mem.Allocator,
+    facts: []const Fact,
+    elements: []const Element,
+    path: []const u8,
+    count: usize,
+) ![]std.ArrayList(Fact) {
     const groups = try scratch.alloc(std.ArrayList(Fact), count);
     for (groups) |*group| group.* = .empty;
     // Each element at `path`, numbered in document order.
@@ -604,7 +652,15 @@ fn sameSubtree(ppm: f64, a: []const Fact, b: []const Fact) bool {
 
 // Files the first unmatched element of A against the unused element of B closest to it, under
 // the most severe key that differs between them, so the rules and `--set` apply as usual.
-fn reportRegrouped(report: *Report, scratch: std.mem.Allocator, id: []const u8, path: []const u8, group: []const Fact, others: []const std.ArrayList(Fact), taken: []const bool) !void {
+fn reportRegrouped(
+    report: *Report,
+    scratch: std.mem.Allocator,
+    id: []const u8,
+    path: []const u8,
+    group: []const Fact,
+    others: []const std.ArrayList(Fact),
+    taken: []const bool,
+) !void {
     var best: ?[]const Fact = null;
     var best_score: usize = 0;
     for (others, taken) |other, used| {
@@ -637,7 +693,16 @@ fn reportRegrouped(report: *Report, scratch: std.mem.Allocator, id: []const u8, 
             key = x.key;
         }
     }
-    try report.addDirty(if (level == .ignored) .major else null, .regrouped, path, key, "", id, try summarize(scratch, path, group), try summarize(scratch, path, other));
+    try report.addDirty(
+        if (level == .ignored) .major else null,
+        .regrouped,
+        path,
+        key,
+        "",
+        id,
+        try summarize(scratch, path, group),
+        try summarize(scratch, path, other),
+    );
 }
 
 // "MS:1000744=641.29 MS:1000041=2 ...", the facts of one element with paths relative to it.
@@ -659,7 +724,13 @@ pub const Role = struct { key: []const u8, unit: []const u8 = "", values: mzml.D
 
 /// The record's decoded arrays keyed by role. With `copy`, the values are copied into `arena` so
 /// they outlive the reader's next record.
-pub fn roles(arena: std.mem.Allocator, record: model.Record, groups: []const cv.Group, decoded: *const mzml.DecodedArrays, copy: bool) ![]Role {
+pub fn roles(
+    arena: std.mem.Allocator,
+    record: model.Record,
+    groups: []const cv.Group,
+    decoded: *const mzml.DecodedArrays,
+    copy: bool,
+) ![]Role {
     const nodes = record.binaryArrays();
     var list: std.ArrayList(Role) = .empty;
     for (0..decoded.len()) |position| {
@@ -677,7 +748,14 @@ pub fn roles(arena: std.mem.Allocator, record: model.Record, groups: []const cv.
 }
 
 /// Compares two records' arrays, matched by role. `path` names the record kind.
-pub fn compareArrays(report: *Report, arena: std.mem.Allocator, id: []const u8, path: []const u8, arrays_a: []const Role, arrays_b: []const Role) !void {
+pub fn compareArrays(
+    report: *Report,
+    arena: std.mem.Allocator,
+    id: []const u8,
+    path: []const u8,
+    arrays_a: []const Role,
+    arrays_b: []const Role,
+) !void {
     // Checked once per record, on the first peak array that differs.
     var order_checked = false;
     var reordered = false;
@@ -700,7 +778,16 @@ pub fn compareArrays(report: *Report, arena: std.mem.Allocator, id: []const u8, 
             }
         }
         if (std.meta.activeTag(x.values) != std.meta.activeTag(y.values))
-            try report.add(.minor, .precision, path, x.key, "", id, @tagName(std.meta.activeTag(x.values)), @tagName(std.meta.activeTag(y.values)));
+            try report.add(
+                .minor,
+                .precision,
+                path,
+                x.key,
+                "",
+                id,
+                @tagName(std.meta.activeTag(x.values)),
+                @tagName(std.meta.activeTag(y.values)),
+            );
         if (len(x.values) != len(y.values)) {
             try report.add(null, .peak_count, path, x.key, "", id, lengthText(arena, x.values), lengthText(arena, y.values));
             continue;
@@ -798,7 +885,8 @@ fn isEncodingTerm(accession: []const u8) bool {
         // zlib, none
         "MS:1000574", "MS:1000576",
         // numpress
-        "MS:1002312", "MS:1002313", "MS:1002314", "MS:1002746", "MS:1002747", "MS:1002748",
+        "MS:1002312", "MS:1002313", "MS:1002314",
+        "MS:1002746", "MS:1002747", "MS:1002748",
     };
     for (terms) |term| if (std.mem.eql(u8, accession, term)) return true;
     return false;
@@ -1020,7 +1108,7 @@ test "the same elements in another order are not regrouped" {
     };
     var b = [_]Fact{
         makeFact(ion, "MS:1000744", "", "427.530", "", 1), makeFact(ion, "MS:1000041", "", "3", "", 1),
-        makeFact(ion, "MS:1000744", "", "641.29", "", 2), makeFact(ion, "MS:1000041", "", "2", "", 2),
+        makeFact(ion, "MS:1000744", "", "641.29", "", 2),  makeFact(ion, "MS:1000041", "", "2", "", 2),
     };
     try diffFacts(&report, "scan=1", &a, &b);
     try diffGrouping(&report, scratch.allocator(), "scan=1", &a, &elements, &b, &elements);
