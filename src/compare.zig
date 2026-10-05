@@ -402,6 +402,14 @@ pub const Collector = struct {
             try self.facts.append(self.arena, makeFact(path, key, "", attribute.value, "", element));
         }
 
+        // Whether an element takes parameters through a group is a fact of its own (the group's id
+        // is bookkeeping): the parameters compare as if written inline, but some readers (Sage)
+        // ignore groups and miss what they hold.
+        for (node.params) |entry| if (entry == .group_ref) {
+            try self.facts.append(self.arena, makeFact(path, "referenceableParamGroupRef", "parameter group", "", "", element));
+            break;
+        };
+
         var params: cv.EffectiveIterator = .{ .entries = node.params, .groups = self.groups };
         while (try params.next()) |entry| switch (entry) {
             .cv => |param| {
