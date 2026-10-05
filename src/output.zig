@@ -656,7 +656,7 @@ fn sideValue(difference: Difference, side: Viewer.Which) []const u8 {
 
 pub fn isTolerance(kind: compare.Kind) bool {
     return switch (kind) {
-        .narrow, .rounding, .ppm, .precision, .peak_order => true,
+        .narrow, .rounding, .ppm, .precision => true,
         else => false,
     };
 }

@@ -1121,7 +1121,10 @@ pub fn compareArrays(
             if (!order_checked) {
                 order_checked = true;
                 reordered = try samePeaks(arena, arrays_a, arrays_b);
-                if (reordered) try report.add(.minor, .peak_order, path, "array:peaks", "m/z and intensity pairs", id, "", "");
+                // Not a tolerance: readers that deisotope or search the peaks assume rising m/z, and
+                // Sage matches other peptides when they fall instead, so the order is a difference
+                // at the arrays' severity (major, `--set array:peaks=...`).
+                if (reordered) try report.add(null, .peak_order, path, "array:peaks", "m/z and intensity pairs", id, "", "");
             }
             if (reordered) continue;
         }

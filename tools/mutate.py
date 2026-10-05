@@ -368,7 +368,7 @@ CASES = [
     ("ms_level_in_group", ms_level_in_group, "minor:extra"),
     ("same_uncompressed", same_uncompressed, None),
     ("same_float32", same_float32, "minor:precision"),
-    ("same_peak_order", same_peak_order, "minor:peak_order"),
+    ("peaks_reversed", same_peak_order, "array:peaks"),
     # Each tolerance, just inside (minor) and just outside (reported).
     ("mz_param_inside", mz_param_inside, "minor:ppm"),
     ("mz_param_outside", mz_param_outside, "MS:1000504"),
