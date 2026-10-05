@@ -45,6 +45,10 @@ if [ -n "$baseline" ] && [ ! -f "$baseline/summary.tsv" ]; then
   exit 2
 fi
 shift $((OPTIND - 1))
+if [ $# -eq 0 ] && [ -z "$corpus" ]; then
+  echo "no RAW files given: name them, or give -c DIR (or set MZDIFF_CORPUS)" >&2
+  exit 2
+fi
 case $tool in mzbridge | opentfraw | mzdata) ;; *) echo "unknown tool: $tool" >&2; exit 2 ;; esac
 
 (cd "$root" && zig build -Doptimize=ReleaseFast)

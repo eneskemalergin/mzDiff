@@ -2,8 +2,8 @@
 """Injects one defect at a time into spectra a search engine identifies, then runs both mzdiff
 and the engine (Sage) on the result, to set mzdiff's severity beside what a real consumer does.
 
-usage: tools/consumer.py [-o OUT] [-n SCANS] [--sage P] [--validate P] [--fasta P] MZDIFF REFERENCE.mzML [CASE...]
-       tools/consumer.py --compare [-o OUT] [--sage P] [--validate P] [--fasta P] MZDIFF REFERENCE.mzML B.mzML...
+usage: tools/consumer.py [-o OUT] [-n SCANS] [--sage P] [--validate P] --fasta P MZDIFF REFERENCE.mzML [CASE...]
+       tools/consumer.py --compare [-o OUT] [--sage P] [--validate P] --fasta P MZDIFF REFERENCE.mzML B.mzML...
 
 Each case edits the same SCANS spectra (default 200): rank-1 target matches at 1% FDR in the
 reference, spread over the run. The engine's result for those spectra is then one of:
@@ -23,14 +23,17 @@ loses spectra and mzdiff says major, STRICT when mzdiff says critical and the en
 (other consumers may still be). `--compare` runs the engine
 on converter outputs instead and compares every spectrum with the reference's results.
 
-Sage, the FASTA, and the engine settings suit Orbitrap HCD runs; the default FASTA is human.
+Sage and mzValidate come from the mzBridge checkout (MZBRIDGE, default ../mzBridge beside this
+repository), as for corpus.sh. The FASTA (--fasta, or MZDIFF_FASTA) must match the reference's
+organism; the engine settings suit Orbitrap HCD runs.
 Writes OUT/consumer.tsv; the edited files are removed as soon as each case is done.
 """
 import argparse, base64, csv, json, math, os, re, shutil, struct, subprocess, sys, zlib
 
 HERE = os.path.dirname(os.path.abspath(__file__))
-SAGE = os.path.join(HERE, "..", "..", "mzBridge", "tools", "bin", "sage")
-VALIDATE = os.path.join(HERE, "..", "..", "mzBridge", "tools", "bin", "mzValidate")
+BRIDGE = os.environ.get("MZBRIDGE") or os.path.join(HERE, "..", "..", "mzBridge")
+SAGE = os.path.join(BRIDGE, "tools", "bin", "sage")
+VALIDATE = os.path.join(BRIDGE, "tools", "bin", "mzValidate")
 FASTA = os.environ.get("MZDIFF_FASTA")
 
 SETTINGS = {
@@ -392,6 +395,8 @@ def main():
     p.add_argument("--validate", default=VALIDATE)
     p.add_argument("--compare", action="store_true")
     args = p.parse_args()
+    if not args.fasta:
+        p.error("give --fasta (or set MZDIFF_FASTA) for the reference's organism")
     os.makedirs(args.out, exist_ok=True)
 
     ok, psms, note, result = sage(args, args.reference, os.path.join(args.out, "reference"))
