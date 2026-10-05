@@ -199,7 +199,8 @@ pub const Report = struct {
         b: []const u8,
         array: ?ArrayDetail,
     ) !void {
-        var level = severity orelse self.rules.severity(key);
+        // `--set` wins even over a severity the check chose itself (a tolerance, a lost record).
+        var level = self.rules.overridden(key) orelse severity orelse self.rules.severity(key);
         if (level == .ignored) return;
         // fileContent summarises the spectra, which are compared themselves.
         if (level == .critical and std.mem.indexOf(u8, path, "fileContent") != null) level = .major;
@@ -1456,6 +1457,22 @@ test "[unit] - [facts]: a unit b drops is at most major and one b adds is minor"
         try std.testing.expectEqual(Kind.unit, classes[0].kind);
         try std.testing.expectEqual(case.severity, classes[0].severity);
     }
+}
+
+test "[unit] - [report]: --set wins over a severity the check chose itself" {
+    const allocator = std.testing.allocator;
+    var rules = Rules.init(allocator);
+    defer rules.deinit();
+    try rules.override("array:MS:1000515", .ignored);
+    try rules.override("MS:1000285", .minor);
+    var report = Report.init(allocator, &rules, 3);
+    defer report.deinit();
+    try report.add(.minor, .precision, "spectrum", "array:MS:1000515", "", "scan=1", "float64", "float32");
+    try report.add(.critical, .value, "spectrum", "MS:1000285", "", "scan=1", "746390.94", "0");
+    const classes = try report.sorted(allocator);
+    defer allocator.free(classes);
+    try std.testing.expectEqual(@as(usize, 1), classes.len);
+    try std.testing.expectEqual(Severity.minor, classes[0].severity);
 }
 
 test "[unit] - [regrouping]: values that trade places between repeated elements are found" {

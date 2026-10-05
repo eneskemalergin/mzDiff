@@ -205,6 +205,11 @@ pub const Rules = struct {
         entry.value_ptr.* = level;
     }
 
+    /// The severity `--set` gave `key`, which wins over any a check chooses itself.
+    pub fn overridden(self: *const Rules, key: []const u8) ?Severity {
+        return self.overrides.get(key);
+    }
+
     pub fn severity(self: *Rules, key: []const u8) Severity {
         if (self.overrides.get(key)) |found| return found;
         if (EXACT.get(key)) |found| return found;
