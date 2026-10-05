@@ -193,7 +193,7 @@ fn writeHeader(out: *std.Io.Writer, outcome: output.Outcome, rows: [3]usize) !vo
         "<div class=\"legend dim\"><span class=\"a\">A</span> left or <code>-</code>," ++
         " <span class=\"b\">B</span> right or <code>+</code>," ++
         " <span class=\"tol\">within a tolerance</span> <code>~</code>; the filters count differences, the badges on a record" ++
-        " count its own</div></header>\n");
+        " count its own; the address keeps the filters, so a link opens the same view</div></header>\n");
 }
 
 fn row(w: *std.Io.Writer, difference: Difference) !void {
@@ -393,7 +393,17 @@ const SCRIPT =
     \\d.addEventListener("mouseover",function(e){var t=e.target.closest&&e.target.closest("tr[data-s] td:last-child");
     \\if(!t||t.title)return;var r=t.parentNode;t.title=MEANING[r.getAttribute("data-s")]+"\n"+
     \\MEANING[r.getAttribute("data-k")];});
-    \\apply();})();
+    \\function save(){var h=[];if(q.value)h.push("q="+encodeURIComponent(q.value));
+    \\boxes.forEach(function(b){if(!b.checked)h.push("hide="+b.getAttribute("data-f"));});
+    \\if(d.body.classList.contains("unified"))h.push("layout=unified");
+    \\history.replaceState(null,"",h.length?"#"+h.join("&"):location.pathname+location.search);}
+    \\function load(){location.hash.slice(1).split("&").forEach(function(p){var kv=p.split("="),v=decodeURIComponent(kv[1]||"");
+    \\if(kv[0]==="q")q.value=v;else if(kv[0]==="hide")boxes.forEach(function(b){if(b.getAttribute("data-f")===v)b.checked=false;});
+    \\else if(kv[0]==="layout"&&v==="unified"){d.body.classList.add("unified");lay.textContent="Side by side";}
+    \\else if(kv[0]==="closed")open(false);});}
+    \\load();apply();
+    \\q.addEventListener("input",save);boxes.forEach(function(b){b.addEventListener("change",save);});
+    \\lay.addEventListener("click",save);})();
 ;
 
 // --- Tests ---
