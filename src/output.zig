@@ -573,7 +573,9 @@ pub const Viewer = struct {
             }
         }
         for (top) |slot| if (slot) |found| {
-            try out.print("mzdiff:   --key {s}  ({s}) differs in {d} records\n", .{ found.key, found.count.name, found.count.records });
+            try out.print("mzdiff:   --key {s}", .{found.key});
+            if (found.count.name.len != 0) try out.print("  ({s})", .{found.count.name});
+            try out.print(" differs in {d} records\n", .{found.count.records});
         };
         try out.writeAll("mzdiff:   --record ID shows one record; --limit N raises the cap; --list shows everything\n\n");
     }
