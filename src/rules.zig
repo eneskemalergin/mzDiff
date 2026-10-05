@@ -100,6 +100,12 @@ const EXACT = std.StaticStringMap(Severity).initComptime(.{
     .{ "indexListOffset", .major },
     // a scan naming a configuration the header lacks
     .{ "instrumentConfiguration", .major },
+
+    // How B wrote the data, where A wrote it otherwise and readers stumble. Outside the standard
+    // is critical: a reader parsing the declared type fails. Inside it but beyond what known
+    // readers handle is major (Sage ignores groups and cannot decode numpress).
+    // a spectrum's or chromatogram's parameters taken through a group
+    .{ "form:paramGroup", .major },
     .{ "@startTimeStamp", .major },
 
     // Bookkeeping that differs between tools by design.

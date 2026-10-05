@@ -353,6 +353,10 @@ pub const Interner = struct {
     }
 };
 
+fn inRecord(path: []const u8) bool {
+    return std.mem.startsWith(u8, path, "spectrum") or std.mem.startsWith(u8, path, "chromatogram");
+}
+
 pub const Collector = struct {
     arena: std.mem.Allocator,
     rules: *Rules,
@@ -402,11 +406,12 @@ pub const Collector = struct {
             try self.facts.append(self.arena, makeFact(path, key, "", attribute.value, "", element));
         }
 
-        // Whether an element takes parameters through a group is a fact of its own (the group's id
-        // is bookkeeping): the parameters compare as if written inline, but some readers (Sage)
-        // ignore groups and miss what they hold.
-        for (node.params) |entry| if (entry == .group_ref) {
-            try self.facts.append(self.arena, makeFact(path, "referenceableParamGroupRef", "parameter group", "", "", element));
+        // Whether a spectrum or chromatogram takes parameters through a group is a fact of its own
+        // (the group's id is bookkeeping): the parameters compare as if written inline, but some
+        // readers (Sage) ignore groups and miss what they hold. The header's groups, which every
+        // header reader resolves, are not noted.
+        if (inRecord(path)) for (node.params) |entry| if (entry == .group_ref) {
+            try self.facts.append(self.arena, makeFact(path, "form:paramGroup", "parameters through a group", "", "", element));
             break;
         };
 

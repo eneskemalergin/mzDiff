@@ -365,7 +365,7 @@ CASES = [
     ("same_number_spelling", same_number_spelling, None),
     ("same_value_whitespace", same_value_whitespace, None),
     ("same_seconds", same_seconds, None),
-    ("ms_level_in_group", ms_level_in_group, "minor:extra"),
+    ("ms_level_in_group", ms_level_in_group, "form:paramGroup"),
     ("same_uncompressed", same_uncompressed, None),
     ("same_float32", same_float32, "minor:precision"),
     ("peaks_reversed", same_peak_order, "array:peaks"),
