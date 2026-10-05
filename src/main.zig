@@ -752,6 +752,8 @@ fn match(list: []Item, x: *const Item, how: Match) ?*Item {
     return null;
 }
 
+// --- Tests ---
+
 test {
     _ = compare;
     _ = rules_mod;

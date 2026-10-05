@@ -235,6 +235,8 @@ pub const Rules = struct {
     }
 };
 
+// --- Tests ---
+
 test "exact keys win over ancestry and the default" {
     var rules = Rules.init(std.testing.allocator);
     defer rules.deinit();
