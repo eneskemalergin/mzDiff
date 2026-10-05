@@ -762,15 +762,14 @@ pub fn diffGrouping(
         const groups_b = try subtrees(scratch, b, elements_b, element.path, count_b);
         const taken = try scratch.alloc(bool, groups_b.len);
         @memset(taken, false);
-        for (groups_a) |group| {
-            var found = false;
-            for (groups_b, taken) |other, *used| {
-                if (used.* or !sameSubtree(report.ppm, group.items, other.items)) continue;
-                used.* = true;
-                found = true;
-                break;
-            }
-            if (found) continue;
+        // B's elements by the hash of their exact contents: an element of A finds an exact partner
+        // by binary search, however many elements repeat or however they are ordered.
+        const index = try scratch.alloc(Hashed, groups_b.len);
+        for (groups_b, index, 0..) |group, *entry, at| entry.* = .{ .hash = subtreeHash(group.items), .at = at };
+        std.mem.sortUnstable(Hashed, index, {}, Hashed.less);
+        for (groups_a, 0..) |group, position_a| {
+            if (matchExact(report.ppm, group.items, groups_b, index, taken)) continue;
+            if (matchNear(report.ppm, group.items, groups_b, taken, position_a)) continue;
             try reportRegrouped(report, scratch, id, element.path, group.items, groups_b, taken);
             try filed.append(scratch, element.path);
             break;
@@ -781,6 +780,65 @@ pub fn diffGrouping(
         if (countPath(elements_b, element.path) < 2 or isDirty(report, element.path)) continue;
         try report.addDirty(null, .count, element.path, "element", "", id, "0 of them", "several");
     }
+}
+
+const Hashed = struct {
+    hash: u64,
+    at: usize,
+
+    fn less(_: void, x: Hashed, y: Hashed) bool {
+        return x.hash < y.hash;
+    }
+};
+
+// A hash of an element's facts exactly as written (path, key, unit, text), the same on both sides
+// for elements that match without any tolerance.
+fn subtreeHash(facts: []const Fact) u64 {
+    var hasher = std.hash.Wyhash.init(0);
+    for (facts) |fact| {
+        for ([_][]const u8{ fact.path, fact.key, fact.unit, fact.text }) |part| {
+            hasher.update(part);
+            hasher.update(&.{0});
+        }
+    }
+    return hasher.final();
+}
+
+fn matchExact(ppm: f64, group: []const Fact, groups: []const std.ArrayList(Fact), index: []const Hashed, taken: []bool) bool {
+    const hash = subtreeHash(group);
+    var low: usize = 0;
+    var high: usize = index.len;
+    while (low < high) {
+        const middle = low + (high - low) / 2;
+        if (index[middle].hash < hash) low = middle + 1 else high = middle;
+    }
+    while (low < index.len and index[low].hash == hash) : (low += 1) {
+        const at = index[low].at;
+        if (taken[at] or !sameSubtree(ppm, group, groups[at].items)) continue;
+        taken[at] = true;
+        return true;
+    }
+    return false;
+}
+
+// Elements of B that match only within a tolerance this many places either side of the same
+// position are looked for; further away, the element is filed as regrouped. It keeps the search
+// linear however many elements repeat.
+const NEAR = 512;
+
+fn matchNear(ppm: f64, group: []const Fact, groups: []const std.ArrayList(Fact), taken: []bool, position: usize) bool {
+    var distance: usize = 0;
+    while (distance <= NEAR) : (distance += 1) {
+        const before: ?usize = if (position >= distance) position - distance else null;
+        const after: ?usize = if (distance != 0) position + distance else null;
+        for ([_]?usize{ before, after }) |candidate| {
+            const at = candidate orelse continue;
+            if (at >= groups.len or taken[at] or !sameSubtree(ppm, group, groups[at].items)) continue;
+            taken[at] = true;
+            return true;
+        }
+    }
+    return false;
 }
 
 fn under(paths: []const []const u8, path: []const u8) bool {
@@ -1394,6 +1452,51 @@ test "[unit] - [regrouping]: values that trade places between repeated elements 
     try std.testing.expectEqual(Kind.regrouped, classes[0].kind);
     try std.testing.expectEqual(Severity.critical, classes[0].severity);
     try std.testing.expectEqualStrings("MS:1000041", classes[0].key);
+}
+
+test "[edge] - [regrouping]: thousands of reordered elements pair exactly, and one swap among them is found" {
+    const allocator = std.testing.allocator;
+    var rules = Rules.init(allocator);
+    defer rules.deinit();
+    var scratch = std.heap.ArenaAllocator.init(allocator);
+    defer scratch.deinit();
+    const arena = scratch.allocator();
+    const path = "spectrum/scanList/scan";
+    const n = 3000;
+    var elements: std.ArrayList(Element) = .empty;
+    try elements.append(arena, .{ .path = "spectrum", .parent = NO_PARENT });
+    for (0..n) |_| try elements.append(arena, .{ .path = path, .parent = 0 });
+    var a: std.ArrayList(Fact) = .empty;
+    var b: std.ArrayList(Fact) = .empty;
+    for (0..n) |k| {
+        const time = try std.fmt.allocPrint(arena, "{d}.5", .{k});
+        const window = try std.fmt.allocPrint(arena, "{d}", .{k * 2});
+        try a.append(arena, makeFact(path, "MS:1000016", "", time, MINUTE, @intCast(k + 1)));
+        try a.append(arena, makeFact(path, "MS:1000501", "", window, "", @intCast(k + 1)));
+        // B holds the same scans in reverse order.
+        try b.append(arena, makeFact(path, "MS:1000016", "", time, MINUTE, @intCast(n - k)));
+        try b.append(arena, makeFact(path, "MS:1000501", "", window, "", @intCast(n - k)));
+    }
+    var report = Report.init(allocator, &rules, 3);
+    defer report.deinit();
+    try diffFacts(&report, "scan=1", a.items, b.items);
+    try diffGrouping(&report, arena, "scan=1", a.items, elements.items, b.items, elements.items);
+    try std.testing.expectEqual(@as(usize, 0), report.classes.count());
+    // Two windows trade places between scans: every value is still there, the pairs are not.
+    var swapped = Report.init(allocator, &rules, 3);
+    defer swapped.deinit();
+    for (b.items) |*fact| {
+        if (std.mem.eql(u8, fact.text, "10"))
+            fact.* = makeFact(path, "MS:1000501", "", "12", "", fact.element)
+        else if (std.mem.eql(u8, fact.text, "12"))
+            fact.* = makeFact(path, "MS:1000501", "", "10", "", fact.element);
+    }
+    try diffFacts(&swapped, "scan=1", a.items, b.items);
+    try diffGrouping(&swapped, arena, "scan=1", a.items, elements.items, b.items, elements.items);
+    const classes = try swapped.sorted(allocator);
+    defer allocator.free(classes);
+    try std.testing.expectEqual(@as(usize, 1), classes.len);
+    try std.testing.expectEqual(Kind.regrouped, classes[0].kind);
 }
 
 test "[edge] - [regrouping]: the same elements in another order are not regrouped" {
