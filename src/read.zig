@@ -222,7 +222,10 @@ fn makeItem(side: *Side, record: model.Record) !Item {
         const scan = scans.next() orelse continue;
         const ref = scan.attribute("instrumentConfigurationRef") orelse side.default_configuration orelse continue;
         const components = side.configurations.get(ref) orelse {
-            try facts.append(arena, compare.makeFact(SCAN_PATH, "instrumentConfiguration", "", ref, "", @intCast(position)));
+            // The reference borrows from the reader's record, which the reader thread reuses for
+            // the next one while this item waits to be compared: copy it like every other value.
+            const owned = try arena.dupe(u8, ref);
+            try facts.append(arena, compare.makeFact(SCAN_PATH, "instrumentConfiguration", "", owned, "", @intCast(position)));
             continue;
         };
         for (components) |component| {
