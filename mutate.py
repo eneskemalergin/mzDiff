@@ -7,7 +7,8 @@ Each case names the key of the critical or major class it must raise, `exit 2` w
 fail to read, or nothing when B must compare the same (a non-defect, or a defect mzValidate owns).
 An edit that shifts bytes also breaks the index offset; that `indexListOffset` class is ignored
 unless the case is about the trailer. A case whose structure the reference lacks is skipped.
-The PRM fixture (PXD006618/1fmol_HSP90_SILpepmix_PRM.mzML) has every structure the cases need.
+The PRM fixture (PXD006618/1fmol_HSP90_SILpepmix_PRM.mzML) has every single-precursor structure;
+an MS3 reference with two precursors per spectrum (PXD070648) has the multi-precursor ones.
 
 Exit status: 0 when every case that ran behaved as expected, 1 otherwise.
 """
@@ -129,6 +130,36 @@ def text_tab(t):
 def value_case(t):
     return first_in_spectrum(t, 5, 'FTMS + c NSI Full ms2', 'ftms + c NSI Full ms2')
 
+def two_precursors(t):
+    i = t.find('<precursorList count="2">')
+    if i < 0:
+        raise Skip("no spectrum with two precursors")
+    return i, t.index("</precursorList>", i)
+
+def swap_values(t, accession):
+    i, e = two_precursors(t)
+    blk = t[i:e]
+    values = re.findall(rf'accession="{accession}" value="([^"]+)"', blk)
+    if len(values) != 2 or values[0] == values[1]:
+        raise Skip(f"the precursors do not hold two different {accession} values")
+    swapped = iter(values[::-1])
+    blk = re.sub(rf'(accession="{accession}" value=")([^"]+)', lambda m: m.group(1) + next(swapped), blk)
+    return t[:i] + blk + t[e:]
+
+def swap_precursor_charge(t):
+    return swap_values(t, "MS:1000041")
+
+def swap_precursor_energy(t):
+    return swap_values(t, "MS:1000045")
+
+def reorder_precursors(t):
+    i, e = two_precursors(t)
+    blk = t[i:e]
+    starts = [m.start() for m in re.finditer(r"[ \t]*<precursor[ >]", blk)]
+    end = blk.rindex("</precursor>") + len("</precursor>")
+    first, second = blk[starts[0]:starts[1]], blk[starts[1]:end]
+    return t[:i] + blk[:starts[0]] + second.rstrip() + "\n" + first.rstrip() + blk[end:] + t[e:]
+
 def empty_spectra(t):
     s = t.index("<spectrum ")
     s = t.rindex("\n", 0, s) + 1
@@ -156,6 +187,9 @@ CASES = [
     ("ic_ref", ic_ref, "instrumentConfiguration"),
     ("array_unit", array_unit, "array:MS:1000515"),
     ("scan_id_format", scan_id_format, "id"),
+    ("swap_precursor_charge", swap_precursor_charge, "MS:1000041"),
+    ("swap_precursor_energy", swap_precursor_energy, "MS:1000045"),
+    ("reorder_precursors", reorder_precursors, None),
     # mzValidate checks these; mzdiff must stay quiet about them.
     ("bad_index_offset", bad_index_offset, None),
     ("bad_checksum", bad_checksum, None),
