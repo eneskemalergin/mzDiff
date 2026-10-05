@@ -114,7 +114,17 @@ pub const Report = struct {
     }
 
     /// Like `add`, and marks the path as holding a real difference in this record.
-    pub fn addDirty(self: *Report, severity: ?Severity, kind: Kind, path: []const u8, key: []const u8, name: []const u8, id: []const u8, a: []const u8, b: []const u8) !void {
+    fn addDirty(
+        self: *Report,
+        severity: ?Severity,
+        kind: Kind,
+        path: []const u8,
+        key: []const u8,
+        name: []const u8,
+        id: []const u8,
+        a: []const u8,
+        b: []const u8,
+    ) !void {
         try self.dirty.append(self.allocator, path);
         try self.add(severity, kind, path, key, name, id, a, b);
     }
@@ -193,6 +203,8 @@ fn clip(text: []const u8) []const u8 {
     return text[0..end];
 }
 
+// --- Facts ---
+
 pub const Fact = struct {
     path: []const u8,
     key: []const u8,
@@ -212,9 +224,6 @@ pub const Fact = struct {
 pub const Element = struct { path: []const u8, parent: u32 };
 
 pub const NO_PARENT = std.math.maxInt(u32);
-
-const SECOND = "UO:0000010";
-const MINUTE = "UO:0000031";
 
 /// Collects the facts of a node and its children. Binary arrays are left to `compareArrays`; the
 /// elements in `skip` (header lists) are left out with their children. With `elements`, each
@@ -253,13 +262,27 @@ pub const Collector = struct {
             .cv => |param| {
                 const key = if (param.accession) |accession| accession.raw else param.name orelse continue;
                 if (self.rules.severity(key) == .ignored) continue;
-                try self.facts.append(self.arena, makeFact(path, key, param.name orelse "", param.value orelse "", unitOf(param.unit), element));
+                try self.facts.append(self.arena, makeFact(
+                    path,
+                    key,
+                    param.name orelse "",
+                    param.value orelse "",
+                    unitOf(param.unit),
+                    element,
+                ));
             },
             .user => |param| {
                 const name = param.name orelse continue;
                 const key = try std.fmt.allocPrint(self.arena, "user:{s}", .{name});
                 if (self.rules.severity(key) == .ignored) continue;
-                try self.facts.append(self.arena, makeFact(path, key, name, param.value orelse "", unitOf(param.unit), element));
+                try self.facts.append(self.arena, makeFact(
+                    path,
+                    key,
+                    name,
+                    param.value orelse "",
+                    unitOf(param.unit),
+                    element,
+                ));
             },
             .group_ref => {},
         };
@@ -267,10 +290,6 @@ pub const Collector = struct {
         for (node.children) |child| try self.add(child, path, element);
     }
 };
-
-fn unitOf(unit: anytype) []const u8 {
-    return if (unit.accession) |accession| accession.raw else unit.name orelse "";
-}
 
 /// Shorthand for `Collector.add` without element tracking, as the header uses it.
 pub fn collect(
@@ -310,20 +329,15 @@ pub fn makeFact(path: []const u8, key: []const u8, name: []const u8, value: []co
     return fact;
 }
 
-fn factLess(_: void, x: Fact, y: Fact) bool {
-    var order = std.mem.order(u8, x.path, y.path);
-    if (order != .eq) return order == .lt;
-    order = std.mem.order(u8, x.key, y.key);
-    if (order != .eq) return order == .lt;
-    if (x.number != null and y.number != null) return x.number.? < y.number.?;
-    if (x.number != null) return true;
-    if (y.number != null) return false;
-    return std.mem.order(u8, x.text, y.text) == .lt;
+const SECOND = "UO:0000010";
+
+const MINUTE = "UO:0000031";
+
+fn unitOf(unit: anytype) []const u8 {
+    return if (unit.accession) |accession| accession.raw else unit.name orelse "";
 }
 
-fn sameGroup(x: Fact, y: Fact) bool {
-    return std.mem.eql(u8, x.path, y.path) and std.mem.eql(u8, x.key, y.key);
-}
+// --- Fact comparison ---
 
 /// Compares two fact lists (sorted here) and files each differing (path, key) once per record.
 /// The paths of real differences (not tolerance-level ones) are kept in `report.dirty`.
@@ -354,6 +368,37 @@ pub fn diffFacts(report: *Report, id: []const u8, a: []Fact, b: []Fact) !void {
     }
 }
 
+/// Sorts and drops exact repeats (same path, key, value, unit): header facts compare as a set,
+/// so a model named once per instrument configuration is not a count difference.
+pub fn dedupe(facts: []Fact) []Fact {
+    std.mem.sort(Fact, facts, {}, factLess);
+    var kept: usize = 0;
+    for (facts) |fact| {
+        if (kept > 0) {
+            const last = facts[kept - 1];
+            if (sameGroup(last, fact) and std.mem.eql(u8, last.text, fact.text) and std.mem.eql(u8, last.unit, fact.unit)) continue;
+        }
+        facts[kept] = fact;
+        kept += 1;
+    }
+    return facts[0..kept];
+}
+
+fn factLess(_: void, x: Fact, y: Fact) bool {
+    var order = std.mem.order(u8, x.path, y.path);
+    if (order != .eq) return order == .lt;
+    order = std.mem.order(u8, x.key, y.key);
+    if (order != .eq) return order == .lt;
+    if (x.number != null and y.number != null) return x.number.? < y.number.?;
+    if (x.number != null) return true;
+    if (y.number != null) return false;
+    return std.mem.order(u8, x.text, y.text) == .lt;
+}
+
+fn sameGroup(x: Fact, y: Fact) bool {
+    return std.mem.eql(u8, x.path, y.path) and std.mem.eql(u8, x.key, y.key);
+}
+
 fn groupLess(x: Fact, y: Fact) bool {
     const order = std.mem.order(u8, x.path, y.path);
     if (order != .eq) return order == .lt;
@@ -371,7 +416,16 @@ fn diffGroup(report: *Report, id: []const u8, a: []const Fact, b: []const Fact) 
     if (a.len != b.len) {
         var ta: [32]u8 = undefined;
         var tb: [32]u8 = undefined;
-        try report.addDirty(null, .count, first.path, first.key, first.name, id, std.fmt.bufPrint(&ta, "{d} of them", .{a.len}) catch "", std.fmt.bufPrint(&tb, "{d} of them", .{b.len}) catch "");
+        try report.addDirty(
+            null,
+            .count,
+            first.path,
+            first.key,
+            first.name,
+            id,
+            std.fmt.bufPrint(&ta, "{d} of them", .{a.len}) catch "",
+            std.fmt.bufPrint(&tb, "{d} of them", .{b.len}) catch "",
+        );
         return;
     }
     for (a, b) |x, y| {
@@ -394,7 +448,7 @@ fn orDash(text: []const u8) []const u8 {
 
 const Verdict = enum { same, narrow, rounding, ppm, different };
 
-/// How two values of the same key compare: equal, equal within a tolerance (and which), or not.
+// How two values of the same key compare: equal, equal within a tolerance (and which), or not.
 fn compareValues(ppm: f64, x: Fact, y: Fact) Verdict {
     if (x.number != null and y.number != null) {
         const p = x.number.?;
@@ -409,6 +463,65 @@ fn compareValues(ppm: f64, x: Fact, y: Fact) Verdict {
     if (std.mem.eql(u8, x.key, "@startTimeStamp") and std.mem.eql(u8, trimFraction(x.text), trimFraction(y.text))) return .same;
     return .different;
 }
+
+// "2015-10-14T03:22:49.630Z" -> "2015-10-14T03:22:49.63": trailing zeros of the seconds
+// fraction and the zone letter Z carry no information.
+fn trimFraction(text: []const u8) []const u8 {
+    var end = text.len;
+    if (end > 0 and text[end - 1] == 'Z') end -= 1;
+    const dot = std.mem.lastIndexOfScalar(u8, text[0..end], '.') orelse return text[0..end];
+    while (end > dot + 1 and text[end - 1] == '0') end -= 1;
+    if (end == dot + 1) end = dot;
+    return text[0..end];
+}
+
+/// True when two numbers are the same value printed with different rounding. With the same
+/// number of decimals they may differ by one unit in the last place ("79.106" and "79.107", one
+/// side rounded from a 32-bit value); with different numbers, the shorter must be the longer
+/// rounded to its places, within half a unit of each. A scale (1/60 for seconds read as minutes)
+/// carries each spelling's precision into the compared unit. A value printed as an integer is
+/// never a rounding: "26" against "26.112" is a nominal value, not the measured one.
+fn lastDigit(text_a: []const u8, text_b: []const u8, a: f64, b: f64, scale_a: f64, scale_b: f64) bool {
+    const da = decimals(text_a) orelse return relativeClose(a, b);
+    const db = decimals(text_b) orelse return relativeClose(a, b);
+    if (da == 0 or db == 0) return false;
+    const ua = std.math.pow(f64, 10.0, -@as(f64, @floatFromInt(da))) * scale_a;
+    const ub = std.math.pow(f64, 10.0, -@as(f64, @floatFromInt(db))) * scale_b;
+    const tolerance = if (da == db and scale_a == scale_b) ua else (ua + ub) / 2;
+    return @abs(a - b) <= tolerance * 1.000001;
+}
+
+// Parameters that hold an m/z value, compared with the ppm tolerance.
+fn isMz(key: []const u8) bool {
+    const keys = [_][]const u8{
+        "MS:1000744", "MS:1000040", "MS:1000827", "MS:1000504", "MS:1000528", "MS:1000527",
+    };
+    for (keys) |k| if (std.mem.eql(u8, key, k)) return true;
+    return false;
+}
+
+/// True when the values agree to 32-bit precision: they round to the same 32-bit float, or lie
+/// within one 32-bit epsilon (2^-23, relative) when rounding falls on either side of a boundary.
+/// One side stored or printed a 32-bit value, the other the 64-bit value it came from.
+fn sameAt32(a: f64, b: f64) bool {
+    const x: f32 = @floatCast(a);
+    const y: f32 = @floatCast(b);
+    if (x == y) return true;
+    return @abs(a - b) <= std.math.floatEps(f32) * @max(@abs(a), @abs(b));
+}
+
+fn relativeClose(a: f64, b: f64) bool {
+    return @abs(a - b) <= 1e-6 * @max(@abs(a), @abs(b));
+}
+
+// Digits after the decimal point; null for exponent notation.
+fn decimals(text: []const u8) ?usize {
+    if (std.mem.indexOfAny(u8, text, "eE") != null) return null;
+    const dot = std.mem.indexOfScalar(u8, text, '.') orelse return 0;
+    return text.len - dot - 1;
+}
+
+// --- Repeated elements ---
 
 /// Checks that repeated elements (two precursors, two scan windows) keep their values together:
 /// facts compared per (path, key) would not notice charge 2 and charge 3 trading places between
@@ -437,7 +550,16 @@ pub fn diffGrouping(
         if (count_a != count_b) {
             var ta: [32]u8 = undefined;
             var tb: [32]u8 = undefined;
-            try report.addDirty(null, .count, element.path, "element", "", id, std.fmt.bufPrint(&ta, "{d} of them", .{count_a}) catch "", std.fmt.bufPrint(&tb, "{d} of them", .{count_b}) catch "");
+            try report.addDirty(
+                null,
+                .count,
+                element.path,
+                "element",
+                "",
+                id,
+                std.fmt.bufPrint(&ta, "{d} of them", .{count_a}) catch "",
+                std.fmt.bufPrint(&tb, "{d} of them", .{count_b}) catch "",
+            );
             continue;
         }
         const groups_a = try subtrees(scratch, a, elements_a, element.path, count_a);
@@ -489,7 +611,13 @@ fn isDirty(report: *const Report, path: []const u8) bool {
 }
 
 // The facts under each element at `path`, in the order the facts are sorted.
-fn subtrees(scratch: std.mem.Allocator, facts: []const Fact, elements: []const Element, path: []const u8, count: usize) ![]std.ArrayList(Fact) {
+fn subtrees(
+    scratch: std.mem.Allocator,
+    facts: []const Fact,
+    elements: []const Element,
+    path: []const u8,
+    count: usize,
+) ![]std.ArrayList(Fact) {
     const groups = try scratch.alloc(std.ArrayList(Fact), count);
     for (groups) |*group| group.* = .empty;
     // Each element at `path`, numbered in document order.
@@ -524,7 +652,15 @@ fn sameSubtree(ppm: f64, a: []const Fact, b: []const Fact) bool {
 
 // Files the first unmatched element of A against the unused element of B closest to it, under
 // the most severe key that differs between them, so the rules and `--set` apply as usual.
-fn reportRegrouped(report: *Report, scratch: std.mem.Allocator, id: []const u8, path: []const u8, group: []const Fact, others: []const std.ArrayList(Fact), taken: []const bool) !void {
+fn reportRegrouped(
+    report: *Report,
+    scratch: std.mem.Allocator,
+    id: []const u8,
+    path: []const u8,
+    group: []const Fact,
+    others: []const std.ArrayList(Fact),
+    taken: []const bool,
+) !void {
     var best: ?[]const Fact = null;
     var best_score: usize = 0;
     for (others, taken) |other, used| {
@@ -557,7 +693,16 @@ fn reportRegrouped(report: *Report, scratch: std.mem.Allocator, id: []const u8, 
             key = x.key;
         }
     }
-    try report.addDirty(if (level == .ignored) .major else null, .regrouped, path, key, "", id, try summarize(scratch, path, group), try summarize(scratch, path, other));
+    try report.addDirty(
+        if (level == .ignored) .major else null,
+        .regrouped,
+        path,
+        key,
+        "",
+        id,
+        try summarize(scratch, path, group),
+        try summarize(scratch, path, other),
+    );
 }
 
 // "MS:1000744=641.29 MS:1000041=2 ...", the facts of one element with paths relative to it.
@@ -572,81 +717,45 @@ fn summarize(scratch: std.mem.Allocator, path: []const u8, facts: []const Fact) 
     return text.items;
 }
 
-// "2015-10-14T03:22:49.630Z" -> "2015-10-14T03:22:49.63": trailing zeros of the seconds
-// fraction and the zone letter Z carry no information.
-fn trimFraction(text: []const u8) []const u8 {
-    var end = text.len;
-    if (end > 0 and text[end - 1] == 'Z') end -= 1;
-    const dot = std.mem.lastIndexOfScalar(u8, text[0..end], '.') orelse return text[0..end];
-    while (end > dot + 1 and text[end - 1] == '0') end -= 1;
-    if (end == dot + 1) end = dot;
-    return text[0..end];
-}
+// --- Arrays ---
 
-/// Sorts and drops exact repeats (same path, key, value, unit): header facts compare as a set,
-/// so a model named once per instrument configuration is not a count difference.
-pub fn dedupe(facts: []Fact) []Fact {
-    std.mem.sort(Fact, facts, {}, factLess);
-    var kept: usize = 0;
-    for (facts) |fact| {
-        if (kept > 0) {
-            const last = facts[kept - 1];
-            if (sameGroup(last, fact) and std.mem.eql(u8, last.text, fact.text) and std.mem.eql(u8, last.unit, fact.unit)) continue;
-        }
-        facts[kept] = fact;
-        kept += 1;
+/// A decoded array: its role key (`array:ACCESSION`), the unit its role term carries, and values.
+pub const Role = struct { key: []const u8, unit: []const u8 = "", values: mzml.DecodedArrays.Values };
+
+/// The record's decoded arrays keyed by role. With `copy`, the values are copied into `arena` so
+/// they outlive the reader's next record.
+pub fn roles(
+    arena: std.mem.Allocator,
+    record: model.Record,
+    groups: []const cv.Group,
+    decoded: *const mzml.DecodedArrays,
+    copy: bool,
+) ![]Role {
+    const nodes = record.binaryArrays();
+    var list: std.ArrayList(Role) = .empty;
+    for (0..decoded.len()) |position| {
+        const array = decoded.get(position) orelse continue;
+        if (array.source_position >= nodes.len) continue;
+        const node = nodes[array.source_position];
+        const key = try roleKey(arena, node, groups);
+        const unit = try arena.dupe(u8, try arrayUnit(node, groups));
+        const values: mzml.DecodedArrays.Values = if (!copy) array.values else switch (array.values) {
+            inline else => |slice, tag| @unionInit(mzml.DecodedArrays.Values, @tagName(tag), try arena.dupe(@TypeOf(slice[0]), slice)),
+        };
+        try list.append(arena, .{ .key = key, .unit = unit, .values = values });
     }
-    return facts[0..kept];
-}
-
-/// True when two numbers are the same value printed with different rounding. With the same
-/// number of decimals they may differ by one unit in the last place ("79.106" and "79.107", one
-/// side rounded from a 32-bit value); with different numbers, the shorter must be the longer
-/// rounded to its places, within half a unit of each. A scale (1/60 for seconds read as minutes)
-/// carries each spelling's precision into the compared unit. A value printed as an integer is
-/// never a rounding: "26" against "26.112" is a nominal value, not the measured one.
-pub fn lastDigit(text_a: []const u8, text_b: []const u8, a: f64, b: f64, scale_a: f64, scale_b: f64) bool {
-    const da = decimals(text_a) orelse return relativeClose(a, b);
-    const db = decimals(text_b) orelse return relativeClose(a, b);
-    if (da == 0 or db == 0) return false;
-    const ua = std.math.pow(f64, 10.0, -@as(f64, @floatFromInt(da))) * scale_a;
-    const ub = std.math.pow(f64, 10.0, -@as(f64, @floatFromInt(db))) * scale_b;
-    const tolerance = if (da == db and scale_a == scale_b) ua else (ua + ub) / 2;
-    return @abs(a - b) <= tolerance * 1.000001;
-}
-
-// Parameters that hold an m/z value, compared with the ppm tolerance.
-fn isMz(key: []const u8) bool {
-    const keys = [_][]const u8{
-        "MS:1000744", "MS:1000040", "MS:1000827", "MS:1000504", "MS:1000528", "MS:1000527",
-    };
-    for (keys) |k| if (std.mem.eql(u8, key, k)) return true;
-    return false;
-}
-
-/// True when the values agree to 32-bit precision: they round to the same 32-bit float, or lie
-/// within one 32-bit epsilon (2^-23, relative) when rounding falls on either side of a boundary.
-/// One side stored or printed a 32-bit value, the other the 64-bit value it came from.
-pub fn sameAt32(a: f64, b: f64) bool {
-    const x: f32 = @floatCast(a);
-    const y: f32 = @floatCast(b);
-    if (x == y) return true;
-    return @abs(a - b) <= std.math.floatEps(f32) * @max(@abs(a), @abs(b));
-}
-
-fn relativeClose(a: f64, b: f64) bool {
-    return @abs(a - b) <= 1e-6 * @max(@abs(a), @abs(b));
-}
-
-// Digits after the decimal point; null for exponent notation.
-fn decimals(text: []const u8) ?usize {
-    if (std.mem.indexOfAny(u8, text, "eE") != null) return null;
-    const dot = std.mem.indexOfScalar(u8, text, '.') orelse return 0;
-    return text.len - dot - 1;
+    return list.items;
 }
 
 /// Compares two records' arrays, matched by role. `path` names the record kind.
-pub fn compareArrays(report: *Report, arena: std.mem.Allocator, id: []const u8, path: []const u8, arrays_a: []const Role, arrays_b: []const Role) !void {
+pub fn compareArrays(
+    report: *Report,
+    arena: std.mem.Allocator,
+    id: []const u8,
+    path: []const u8,
+    arrays_a: []const Role,
+    arrays_b: []const Role,
+) !void {
     // Checked once per record, on the first peak array that differs.
     var order_checked = false;
     var reordered = false;
@@ -669,7 +778,16 @@ pub fn compareArrays(report: *Report, arena: std.mem.Allocator, id: []const u8, 
             }
         }
         if (std.meta.activeTag(x.values) != std.meta.activeTag(y.values))
-            try report.add(.minor, .precision, path, x.key, "", id, @tagName(std.meta.activeTag(x.values)), @tagName(std.meta.activeTag(y.values)));
+            try report.add(
+                .minor,
+                .precision,
+                path,
+                x.key,
+                "",
+                id,
+                @tagName(std.meta.activeTag(x.values)),
+                @tagName(std.meta.activeTag(y.values)),
+            );
         if (len(x.values) != len(y.values)) {
             try report.add(null, .peak_count, path, x.key, "", id, lengthText(arena, x.values), lengthText(arena, y.values));
             continue;
@@ -725,28 +843,6 @@ fn toMinutes(arena: std.mem.Allocator, values: mzml.DecodedArrays.Values) !mzml.
     return .{ .float64 = out };
 }
 
-/// A decoded array: its role key (`array:ACCESSION`), the unit its role term carries, and values.
-pub const Role = struct { key: []const u8, unit: []const u8 = "", values: mzml.DecodedArrays.Values };
-
-/// The record's decoded arrays keyed by role. With `copy`, the values are copied into `arena` so
-/// they outlive the reader's next record.
-pub fn roles(arena: std.mem.Allocator, record: model.Record, groups: []const cv.Group, decoded: *const mzml.DecodedArrays, copy: bool) ![]Role {
-    const nodes = record.binaryArrays();
-    var list: std.ArrayList(Role) = .empty;
-    for (0..decoded.len()) |position| {
-        const array = decoded.get(position) orelse continue;
-        if (array.source_position >= nodes.len) continue;
-        const node = nodes[array.source_position];
-        const key = try roleKey(arena, node, groups);
-        const unit = try arena.dupe(u8, try arrayUnit(node, groups));
-        const values: mzml.DecodedArrays.Values = if (!copy) array.values else switch (array.values) {
-            inline else => |slice, tag| @unionInit(mzml.DecodedArrays.Values, @tagName(tag), try arena.dupe(@TypeOf(slice[0]), slice)),
-        };
-        try list.append(arena, .{ .key = key, .unit = unit, .values = values });
-    }
-    return list.items;
-}
-
 fn roleKey(arena: std.mem.Allocator, node: model.Node, groups: []const cv.Group) ![]const u8 {
     switch (try model.arrayRole(node, groups)) {
         .mz => return "array:MS:1000514",
@@ -784,9 +880,13 @@ fn arrayUnit(node: model.Node, groups: []const cv.Group) ![]const u8 {
 
 fn isEncodingTerm(accession: []const u8) bool {
     const terms = [_][]const u8{
-        "MS:1000519", "MS:1000520", "MS:1000521", "MS:1000522", "MS:1000523", // primitives
-        "MS:1000574", "MS:1000576", // zlib, none
-        "MS:1002312", "MS:1002313", "MS:1002314", "MS:1002746", "MS:1002747", "MS:1002748", // numpress
+        // primitives
+        "MS:1000519", "MS:1000520", "MS:1000521", "MS:1000522", "MS:1000523",
+        // zlib, none
+        "MS:1000574", "MS:1000576",
+        // numpress
+        "MS:1002312", "MS:1002313", "MS:1002314",
+        "MS:1002746", "MS:1002747", "MS:1002748",
     };
     for (terms) |term| if (std.mem.eql(u8, accession, term)) return true;
     return false;
@@ -817,15 +917,15 @@ fn valueAt(values: mzml.DecodedArrays.Values, at: usize) f64 {
 }
 
 const Mismatch = struct {
-    /// First index whose values differ at all (beyond what 32-bit storage explains when either
-    /// side is 32-bit).
+    // First index whose values differ at all (beyond what 32-bit storage explains when either
+    // side is 32-bit).
     exact: ?usize = null,
-    /// First index whose values differ beyond the tolerance.
+    // First index whose values differ beyond the tolerance.
     beyond: ?usize = null,
 };
 
-/// Finds differing values. `ppm` > 0 compares within that many parts per million (m/z arrays);
-/// otherwise within 32-bit precision.
+// Finds differing values. `ppm` > 0 compares within that many parts per million (m/z arrays);
+// otherwise within 32-bit precision.
 fn firstMismatch(a: mzml.DecodedArrays.Values, b: mzml.DecodedArrays.Values, ppm: f64) Mismatch {
     if (a == .float64 and b == .float64 and std.mem.eql(u8, std.mem.sliceAsBytes(a.float64), std.mem.sliceAsBytes(b.float64))) return .{};
     if (a == .float32 and b == .float32 and std.mem.eql(u8, std.mem.sliceAsBytes(a.float32), std.mem.sliceAsBytes(b.float32))) return .{};
@@ -870,12 +970,14 @@ fn pairs(arena: std.mem.Allocator, list: []const Role) !?[][2]f32 {
     return out;
 }
 
-test "timestamps differing only in trailing zeros are equal" {
+// --- Tests ---
+
+test "[edge] - [values]: timestamps differing only in trailing zeros are equal" {
     try std.testing.expectEqualStrings(trimFraction("2015-10-14T03:22:49.63Z"), trimFraction("2015-10-14T03:22:49.630Z"));
     try std.testing.expectEqualStrings("2015-10-14T03:22:49", trimFraction("2015-10-14T03:22:49.000Z"));
 }
 
-test "last digit differences are rounding, larger ones are not" {
+test "[unit] - [values]: last-digit differences are rounding, larger ones are not" {
     try std.testing.expect(lastDigit("79.106", "79.107", 79.106, 79.107, 1, 1));
     try std.testing.expect(!lastDigit("0.5", "0.75", 0.5, 0.75, 1, 1));
     try std.testing.expect(!lastDigit("79", "80", 79, 80, 1, 1));
@@ -887,13 +989,13 @@ test "last digit differences are rounding, larger ones are not" {
     try std.testing.expect(!lastDigit("6.5", "7", 6.5, 7, 1, 1));
 }
 
-test "values equal at 32-bit precision are told apart from real differences" {
+test "[unit] - [values]: values equal at 32-bit precision are told apart from real differences" {
     try std.testing.expect(sameAt32(573.290283203125, 573.2902916127172));
     try std.testing.expect(!sameAt32(573.2903, 573.2911));
     try std.testing.expect(sameAt32(0.1853804976, 0.1853804886341095));
 }
 
-test "facts compare by value whatever the spelling and order" {
+test "[unit] - [facts]: facts compare by value whatever the spelling and order" {
     const allocator = std.testing.allocator;
     var rules = Rules.init(allocator);
     defer rules.deinit();
@@ -911,7 +1013,7 @@ test "facts compare by value whatever the spelling and order" {
     try std.testing.expectEqual(@as(usize, 0), report.classes.count());
 }
 
-test "a missing parameter and a changed value are filed with their severity" {
+test "[unit] - [facts]: a missing parameter and a changed value are filed with their severity" {
     const allocator = std.testing.allocator;
     var rules = Rules.init(allocator);
     defer rules.deinit();
@@ -929,7 +1031,7 @@ test "a missing parameter and a changed value are filed with their severity" {
     for (classes) |class| try std.testing.expectEqual(Severity.critical, class.severity);
 }
 
-test "seconds read as minutes keep the precision they were printed with" {
+test "[edge] - [values]: seconds read as minutes keep the precision they were printed with" {
     // 3000.12 s is 50.002 min; "50.1" min is 5.9 s away, far beyond the last printed digit.
     const a = makeFact("spectrum/scan", "MS:1000016", "", "3000.12", SECOND, 0);
     const b = makeFact("spectrum/scan", "MS:1000016", "", "50.1", MINUTE, 0);
@@ -938,7 +1040,7 @@ test "seconds read as minutes keep the precision they were printed with" {
     try std.testing.expect(compareValues(1, a, c) != .different);
 }
 
-test "a unit on one side only is a difference" {
+test "[unit] - [facts]: a unit on one side only is a difference" {
     const allocator = std.testing.allocator;
     var rules = Rules.init(allocator);
     defer rules.deinit();
@@ -953,7 +1055,7 @@ test "a unit on one side only is a difference" {
     try std.testing.expectEqual(Kind.unit, classes[0].kind);
 }
 
-test "values that trade places between repeated elements are found" {
+test "[unit] - [regrouping]: values that trade places between repeated elements are found" {
     const allocator = std.testing.allocator;
     var rules = Rules.init(allocator);
     defer rules.deinit();
@@ -986,7 +1088,7 @@ test "values that trade places between repeated elements are found" {
     try std.testing.expectEqualStrings("MS:1000041", classes[0].key);
 }
 
-test "the same elements in another order are not regrouped" {
+test "[edge] - [regrouping]: the same elements in another order are not regrouped" {
     const allocator = std.testing.allocator;
     var rules = Rules.init(allocator);
     defer rules.deinit();
@@ -1006,14 +1108,14 @@ test "the same elements in another order are not regrouped" {
     };
     var b = [_]Fact{
         makeFact(ion, "MS:1000744", "", "427.530", "", 1), makeFact(ion, "MS:1000041", "", "3", "", 1),
-        makeFact(ion, "MS:1000744", "", "641.29", "", 2), makeFact(ion, "MS:1000041", "", "2", "", 2),
+        makeFact(ion, "MS:1000744", "", "641.29", "", 2),  makeFact(ion, "MS:1000041", "", "2", "", 2),
     };
     try diffFacts(&report, "scan=1", &a, &b);
     try diffGrouping(&report, scratch.allocator(), "scan=1", &a, &elements, &b, &elements);
     try std.testing.expectEqual(@as(usize, 0), report.classes.count());
 }
 
-test "clipped examples end on a character boundary" {
+test "[edge] - [report]: clipped examples end on a character boundary" {
     const text = "a" ** 159 ++ "é";
     try std.testing.expectEqual(@as(usize, 159), clip(text).len);
 }
