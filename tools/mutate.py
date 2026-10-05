@@ -63,6 +63,8 @@ def truncate_after_spectra(t):
     return t[:t.index("</spectrumList>") + len("</spectrumList>")]
 
 def truncate_before_index(t):
+    if "<indexList" not in t:
+        raise Skip("the reference has no index")
     return t[:t.index("<indexList")]
 
 def first_in_spectrum(t, scan, old, new):
@@ -72,13 +74,19 @@ def first_in_spectrum(t, scan, old, new):
         raise Skip(f"scan {scan} has no {old!r}")
     return t[:a0] + blk.replace(old, new, 1) + t[a1:]
 
+def first_chromatogram(t):
+    i = t.find("<chromatogram ")
+    if i < 0:
+        raise Skip("the reference has no chromatogram")
+    return i
+
 def chrom_time_unit(t):
-    i = t.index("<chromatogram ")
+    i = first_chromatogram(t)
     j = t.index('unitAccession="UO:0000031" unitName="minute"', i)
     return t[:j] + 'unitAccession="UO:0000010" unitName="second"' + t[j + len('unitAccession="UO:0000031" unitName="minute"'):]
 
 def chrom_type_change(t):
-    i = t.index("<chromatogram ")
+    i = first_chromatogram(t)
     e = t.index("</chromatogram>", i)
     blk = t[i:e]
     blk2 = re.sub(r'accession="MS:\d+" value="" name="[^"]*chromatogram"', 'accession="MS:1000235" value="" name="total ion current chromatogram"', blk, count=1)
@@ -91,12 +99,22 @@ def sst_coarse(t):
     a0, a1 = spectrum_block(t, 2000)
     blk = t[a0:a1]
     m = re.search(r'accession="MS:1000016" value="([^"]+)"', blk)
+    if not m:
+        raise Skip("scan 2000 has no scan start time")
     v = float(m.group(1))
-    new = f"{v + 0.09:.1f}"  # off by up to ~5 s, printed with one decimal
+    # One decimal, and more than any rounding of the original can explain (0.15 to 0.25 off).
+    new = f"{round(v, 1) + 0.2:.1f}"
     blk = blk[:m.start(1)] + new + blk[m.end(1):]
     return t[:a0] + blk + t[a1:]
 
 def ic_ref(t):
+    # A configuration the header does not have.
+    return first_in_spectrum(t, 5, 'instrumentConfigurationRef="IC1"', 'instrumentConfigurationRef="IC99"')
+
+def ic_other(t):
+    # Another configuration the header has: the scan's analyzer changes.
+    if 'instrumentConfiguration id="IC2"' not in t:
+        raise Skip("the reference has one instrument configuration")
     return first_in_spectrum(t, 5, 'instrumentConfigurationRef="IC1"', 'instrumentConfigurationRef="IC2"')
 
 def array_unit(t):
@@ -282,10 +300,10 @@ def intensity_outside(t):
     return with_array(t, 5, "MS:1000515", lambda v: scale_at(v, 3, 1 + 1e-6))
 
 def rounding_inside(t):
-    return param_value(t, 5, "MS:1000016", lambda v: f"{float(v):.5f}")
+    return param_value(t, 5, "MS:1000016", lambda v: f"{float(v):.3f}")
 
 def rounding_outside(t):
-    return param_value(t, 5, "MS:1000016", lambda v: f"{float(v) + 2e-5:.5f}")
+    return param_value(t, 5, "MS:1000016", lambda v: f"{round(float(v), 3) + 0.002:.3f}")
 
 def empty_spectra(t):
     s = t.index("<spectrum ")
@@ -312,6 +330,7 @@ CASES = [
     ("sst_coarse", sst_coarse, "MS:1000016"),
     ("value_case", value_case, "MS:1000512"),
     ("ic_ref", ic_ref, "instrumentConfiguration"),
+    ("ic_other", ic_other, "MS:1000484"),
     ("array_unit", array_unit, "array:MS:1000515"),
     ("mz_unit_dropped", mz_unit_dropped, "array:MS:1000514"),
     ("scan_id_format", scan_id_format, "@id"),
