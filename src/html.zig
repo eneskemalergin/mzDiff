@@ -133,7 +133,15 @@ pub const Page = struct {
         try writeEscaped(out, std.fs.path.basename(outcome.a.path));
         try out.writeAll(" against ");
         try writeEscaped(out, std.fs.path.basename(outcome.b.path));
-        try out.writeAll("</title>\n<style>" ++ CSS ++ "</style></head><body>\n");
+        try out.writeAll("</title>\n");
+        // The script is the tooltip table and the code; it is written once here, so the bytes the
+        // policy hashes are the bytes the page carries.
+        var script: std.Io.Writer.Allocating = .init(self.allocator);
+        defer script.deinit();
+        try writeMeanings(&script.writer);
+        try script.writer.writeAll(SCRIPT);
+        try writePolicy(out, script.written());
+        try out.writeAll("<style>" ++ CSS ++ "</style></head><body>\n");
         try writeHeader(out, outcome, self.rows);
         if (self.tally.too_large) {
             var refusal: std.Io.Writer.Allocating = .init(self.allocator);
@@ -150,8 +158,8 @@ pub const Page = struct {
             try out.writeAll("</main>\n");
         }
         try out.writeAll(FOOTER ++ "<script>");
-        try writeMeanings(out);
-        try out.writeAll(SCRIPT ++ "</script>\n</body></html>\n");
+        try out.writeAll(script.written());
+        try out.writeAll("</script>\n</body></html>\n");
     }
 };
 
@@ -269,6 +277,24 @@ pub fn writeEscaped(w: *std.Io.Writer, text: []const u8) !void {
         start = i;
     }
     try w.writeAll(text[start..]);
+}
+
+// A Content-Security-Policy that lets the browser run only this page's own style and script,
+// named by their SHA-256 digests, and fetch nothing at all: whatever a value from the files holds,
+// no other script, style, image, form, or connection can come of it.
+fn writePolicy(out: *std.Io.Writer, script: []const u8) !void {
+    try out.writeAll("<meta http-equiv=\"Content-Security-Policy\" content=\"default-src 'none'; style-src 'sha256-");
+    try writeDigest(out, CSS);
+    try out.writeAll("'; script-src 'sha256-");
+    try writeDigest(out, script);
+    try out.writeAll("'; img-src 'none'; base-uri 'none'; form-action 'none'\">\n");
+}
+
+fn writeDigest(out: *std.Io.Writer, text: []const u8) !void {
+    var digest: [std.crypto.hash.sha2.Sha256.digest_length]u8 = undefined;
+    std.crypto.hash.sha2.Sha256.hash(text, &digest, .{});
+    var encoded: [std.base64.standard.Encoder.calcSize(digest.len)]u8 = undefined;
+    try out.writeAll(std.base64.standard.Encoder.encode(&encoded, &digest));
 }
 
 // The tooltip tables the script reads: severity and kind meanings, keyed by their tags.
