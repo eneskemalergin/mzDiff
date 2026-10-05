@@ -79,7 +79,10 @@ The report lists classes of differences, most severe and most frequent first, ea
 
 Each file is read and decoded on its own thread; the main thread pairs and compares, and memory stays bounded by the records in flight. Most of the time is zlib inflation and XML parsing inside zmz.
 
-Measured on the 5.3 GiB Astral run `Gong_1.raw` (TRFP 4.0 GB against mzBridge 3.6 GB, 156,082 spectra): 16.8 s and 16.7 MB peak RSS. The PRM fixture (2,103 spectra) takes 0.2 s.
+Measured with [zebrac](https://github.com/eneskemalergin/zebrac) 0.6.3 on the stripped ReleaseFast build, warm page cache, x86_64 Linux:
+
+- `Gong_1.raw`, the 5.3 GiB Astral run (TRFP 4.0 GB against mzBridge 3.6 GB, 156,082 spectra): 17.1 s ± 0.08 s wall time over 3 runs, and 20.5 MB peak RSS pinned to one CPU.
+- The PRM fixture (2,103 spectra): 102 ms ± 3.5 ms over 50 runs, and 4.7 MB peak RSS unpinned.
 
 ## References
 
@@ -87,6 +90,7 @@ Measured on the 5.3 GiB Astral run `Gong_1.raw` (TRFP 4.0 GB against mzBridge 3.
 - [zmz](https://github.com/eneskemalergin/zmz): the mzML reader mzdiff is built on
 - [ThermoRawFileParser](https://github.com/CompOmics/ThermoRawFileParser): the gold reference for Thermo `.raw` files
 - [mzValidate](https://github.com/eneskemalergin/mzValidate): validates each file on its own
+- [zebrac](https://github.com/eneskemalergin/zebrac): the benchmark runner behind the numbers above
 
 ## License
 
