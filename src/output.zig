@@ -172,14 +172,14 @@ pub fn writeReport(
                 }
                 try out.print("  {d:>8}  {s:<26} ", .{ class.records, class.kind.label() });
                 try writeShortPath(out, class.path);
-                try out.print("  {s}", .{class.key});
-                if (class.name.len != 0) try out.print(" ({s})", .{class.name});
+                try out.print("  {f}", .{safe(class.key)});
+                if (class.name.len != 0) try out.print(" ({f})", .{safe(class.name)});
                 try out.writeByte('\n');
                 for (class.examples.items) |example| {
-                    try out.print("            {s}", .{example.id});
+                    try out.print("            {f}", .{safe(example.id)});
                     if (example.a.len != 0 or example.b.len != 0) try out.print(
-                        "  A: {s}  B: {s}",
-                        .{ orNone(example.a), orNone(example.b) },
+                        "  A: {f}  B: {f}",
+                        .{ safe(orNone(example.a)), safe(orNone(example.b)) },
                     );
                     try out.writeByte('\n');
                 }
@@ -291,17 +291,17 @@ pub const Lister = struct {
         if (!std.mem.eql(u8, self.last_record.items, difference.record)) {
             self.last_record.clearRetainingCapacity();
             try self.last_record.appendSlice(self.allocator, difference.record);
-            try out.print("{s}\n", .{difference.record});
+            try out.print("{f}\n", .{safe(difference.record)});
         }
         try out.writeAll("  ");
         try self.style.severity(out, difference.severity, 9);
         try out.print("{s:<26} ", .{difference.kind.label()});
         try writeShortPath(out, difference.path);
-        try out.print("  {s}", .{difference.key});
-        if (difference.name.len != 0) try out.print(" ({s})", .{difference.name});
+        try out.print("  {f}", .{safe(difference.key)});
+        if (difference.name.len != 0) try out.print(" ({f})", .{safe(difference.name)});
         if (difference.a.len != 0 or difference.b.len != 0) try out.print(
-            "  A: {s}  B: {s}",
-            .{ orNone(difference.a), orNone(difference.b) },
+            "  A: {f}  B: {f}",
+            .{ safe(orNone(difference.a)), safe(orNone(difference.b)) },
         );
         if (difference.array) |array| {
             try out.print("  ({d} of {d} values differ", .{ array.differing, array.values });
@@ -429,8 +429,8 @@ pub const Tally = struct {
         if (self.differing[2] != 0 and serious != 0 and serious <= self.records)
             try out.print("mzdiff:   --severity major     shows {d} records\n", .{serious});
         for (self.topKeys()) |slot| if (slot) |found| {
-            try out.print("mzdiff:   --key {s}", .{found.key});
-            if (found.name.len != 0) try out.print("  ({s})", .{found.name});
+            try out.print("mzdiff:   --key {f}", .{safe(found.key)});
+            if (found.name.len != 0) try out.print("  ({f})", .{safe(found.name)});
             try out.print(" differs in {d} records\n", .{found.records});
         };
         try out.writeAll("mzdiff:   --record ID shows one record; --limit N raises the cap; --list shows everything\n\n");
@@ -514,7 +514,7 @@ pub const Viewer = struct {
         const w = &self.buffer.writer;
         if (self.tally.shown > 1) try w.writeByte('\n');
         if (self.style.color) try w.writeAll("\x1b[1m");
-        try w.print("{s}", .{record});
+        try w.print("{f}", .{safe(record)});
         if (self.style.color) try w.writeAll("\x1b[0m");
         try w.writeByte('\n');
         if (self.layout == .side_by_side) {
@@ -566,10 +566,10 @@ pub const Viewer = struct {
     fn line(self: *Viewer, w: *std.Io.Writer, marker: u8, side: Which, label: []const u8, value: []const u8) !usize {
         const color = if (marker == '~') "\x1b[33m" else if (side == .a) "\x1b[31m" else "\x1b[32m";
         if (self.style.color) try w.writeAll(color);
-        try w.print("  {c} {s}", .{ marker, label });
+        try w.print("  {c} {f}", .{ marker, safe(label) });
         var width = 4 + label.len;
         if (value.len != 0) {
-            try w.print(" = {s}", .{value});
+            try w.print(" = {f}", .{safe(value)});
             width += 3 + value.len;
         }
         if (self.style.color) try w.writeAll("\x1b[0m");
@@ -675,7 +675,12 @@ pub fn describe(buffer: []u8, difference: Difference) []const u8 {
 }
 
 // `text` cut or padded to exactly `width` bytes, so the columns line up (cut at a UTF-8 boundary).
-fn writePadded(out: *std.Io.Writer, text: []const u8, width: usize) !void {
+fn writePadded(out: *std.Io.Writer, untrusted: []const u8, width: usize) !void {
+    // Made safe first, so the padding counts what the terminal shows.
+    var safe_buffer: [1024]u8 = undefined;
+    var fixed = std.Io.Writer.fixed(&safe_buffer);
+    writeSafe(&fixed, untrusted, false) catch {};
+    const text = fixed.buffered();
     if (text.len <= width) {
         try out.writeAll(text);
         try out.splatByteAll(' ', width - text.len);
@@ -688,7 +693,9 @@ fn writePadded(out: *std.Io.Writer, text: []const u8, width: usize) !void {
 }
 
 fn writeHeadText(out: *std.Io.Writer, style: Style, outcome: Outcome) !void {
-    try out.print("A  {s}  ({s})\nB  {s}  ({s})\n", .{ outcome.a.path, outcome.a.software, outcome.b.path, outcome.b.software });
+    try out.print("A  {f}  ({f})\nB  {f}  ({f})\n", .{
+        safe(outcome.a.path), safe(outcome.a.software), safe(outcome.b.path), safe(outcome.b.software),
+    });
     try out.print("spectra        A {d}  B {d}  paired {d}{s}\n", .{
         outcome.a.spectra,
         outcome.b.spectra,
@@ -765,20 +772,103 @@ pub fn writeShortPath(out: *std.Io.Writer, path: []const u8) !void {
     while (parts.next()) |part| {
         if (std.mem.endsWith(u8, part, "List") and parts.peek() != null) continue;
         if (!first) try out.writeByte('/');
-        try out.writeAll(part);
+        try writeSafe(out, part, false);
         first = false;
     }
 }
 
-// A TSV field with tabs and line breaks escaped, so each row stays one line.
+/// How many bytes of a character that must not reach a terminal or a page as it is start at
+/// `text[i]`, or 0: C0 controls and DEL (an escape sequence can rewrite a terminal), C1 controls
+/// (UTF-8 C2 80 to C2 9F), and the bidirectional embeddings, overrides, and isolates (U+202A to
+/// U+202E, U+2066 to U+2069), which can make text display in another order than it reads.
+pub fn unsafeLength(text: []const u8, i: usize) usize {
+    const c = text[i];
+    if (c < 0x20 or c == 0x7f) return 1;
+    if (c == 0xC2 and i + 1 < text.len and text[i + 1] >= 0x80 and text[i + 1] <= 0x9F) return 2;
+    if (c == 0xE2 and i + 2 < text.len) {
+        const b1 = text[i + 1];
+        const b2 = text[i + 2];
+        if (b1 == 0x80 and b2 >= 0xAA and b2 <= 0xAE) return 3;
+        if (b1 == 0x81 and b2 >= 0xA6 and b2 <= 0xA9) return 3;
+    }
+    return 0;
+}
+
+/// Writes an unsafe character (one `unsafeLength` found) as visible text: `\t`, `\n`, `\r`,
+/// `\x1b`, or `\u{202e}`.
+pub fn writeUnsafe(out: *std.Io.Writer, bytes: []const u8) !void {
+    switch (bytes.len) {
+        1 => switch (bytes[0]) {
+            '\t' => try out.writeAll("\\t"),
+            '\n' => try out.writeAll("\\n"),
+            '\r' => try out.writeAll("\\r"),
+            else => try out.print("\\x{x:0>2}", .{bytes[0]}),
+        },
+        else => {
+            const codepoint = std.unicode.utf8Decode(bytes) catch 0xFFFD;
+            try out.print("\\u{{{x:0>4}}}", .{codepoint});
+        },
+    }
+}
+
+// Writes untrusted text with its unsafe characters made visible; in a TSV cell, a backslash is
+// doubled too, so the cell reads back unambiguously.
+fn writeSafe(out: *std.Io.Writer, text: []const u8, tsv: bool) !void {
+    var start: usize = 0;
+    var i: usize = 0;
+    while (i < text.len) {
+        // Printable ASCII is by far the most of it, and never unsafe: skip it 16 bytes at a time.
+        if (i + 16 <= text.len) {
+            const chunk: @Vector(16, u8) = text[i..][0..16].*;
+            // 0x20 to 0x7e land below 0x5f once 0x20 is taken away; everything else wraps above it.
+            const outside = chunk -% @as(@Vector(16, u8), @splat(0x20)) >= @as(@Vector(16, u8), @splat(0x5f));
+            const slash = chunk == @as(@Vector(16, u8), @splat('\\'));
+            const any = @reduce(.Or, outside) or (tsv and @reduce(.Or, slash));
+            if (!any) {
+                i += 16;
+                continue;
+            }
+        }
+        const c = text[i];
+        if (c >= 0x20 and c < 0x7f and !(tsv and c == '\\')) {
+            i += 1;
+            continue;
+        }
+        const length = unsafeLength(text, i);
+        if (length == 0 and !(tsv and c == '\\')) {
+            i += 1;
+            continue;
+        }
+        try out.writeAll(text[start..i]);
+        if (length == 0) {
+            try out.writeAll("\\\\");
+            i += 1;
+        } else {
+            try writeUnsafe(out, text[i .. i + length]);
+            i += length;
+        }
+        start = i;
+    }
+    try out.writeAll(text[start..]);
+}
+
+/// Untrusted text for a terminal, written with `{f}`: its unsafe characters made visible.
+pub const Safe = struct {
+    text: []const u8,
+
+    pub fn format(self: Safe, out: *std.Io.Writer) std.Io.Writer.Error!void {
+        try writeSafe(out, self.text, false);
+    }
+};
+
+pub fn safe(text: []const u8) Safe {
+    return .{ .text = text };
+}
+
+// A TSV field with tabs, line breaks, backslashes, and other unsafe characters escaped, so each
+// row stays one line and reads back unambiguously.
 fn writeTsvField(out: *std.Io.Writer, text: []const u8) !void {
-    for (text) |c| switch (c) {
-        '\t' => try out.writeAll("\\t"),
-        '\n' => try out.writeAll("\\n"),
-        '\r' => try out.writeAll("\\r"),
-        '\\' => try out.writeAll("\\\\"),
-        else => try out.writeByte(c),
-    };
+    try writeSafe(out, text, true);
 }
 
 fn writeJsonString(out: *std.Io.Writer, text: []const u8) !void {
@@ -900,6 +990,16 @@ test "[edge] - [view]: more records than the cap are refused with counts and key
     try std.testing.expect(std.mem.startsWith(u8, text, "mzdiff: too large to view: 3 records differ (critical 0, major 3, minor 0)"));
     try std.testing.expect(std.mem.indexOf(u8, text, "--key MS:1000512  (filter string) differs in 3 records") != null);
     try std.testing.expect(std.mem.indexOf(u8, text, "filter string = x") == null);
+}
+
+test "[edge] - [output]: control characters and bidirectional overrides show as visible escapes" {
+    var buffer: [128]u8 = undefined;
+    var out = std.Io.Writer.fixed(&buffer);
+    try out.print("{f}", .{safe("a\x1b[2Jb\u{202e}c\td C:\\x \u{e9}\u{85}")});
+    try std.testing.expectEqualStrings("a\\x1b[2Jb\\u{202e}c\\td C:\\x \u{e9}\\u{0085}", out.buffered());
+    out = std.Io.Writer.fixed(&buffer);
+    try writeTsvField(&out, "C:\\x\t\x07");
+    try std.testing.expectEqualStrings("C:\\\\x\\t\\x07", out.buffered());
 }
 
 test "[unit] - [output]: a list in JSON Lines ends with one summary line" {

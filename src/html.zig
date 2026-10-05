@@ -238,21 +238,35 @@ fn value(w: *std.Io.Writer, side: []const u8, text: []const u8, present: bool) !
     try w.writeAll("</div>");
 }
 
-/// Writes `text` safe for HTML text and quoted attributes alike.
+/// Writes `text` safe for HTML text and quoted attributes alike: markup characters as entities,
+/// and control characters and bidirectional overrides as visible escapes (`\x1b`, `\u{202e}`).
 pub fn writeEscaped(w: *std.Io.Writer, text: []const u8) !void {
     var start: usize = 0;
-    for (text, 0..) |c, i| {
-        const entity: []const u8 = switch (c) {
+    var i: usize = 0;
+    while (i < text.len) {
+        const c = text[i];
+        const unsafe = output.unsafeLength(text, i);
+        const entity: ?[]const u8 = switch (c) {
             '&' => "&amp;",
             '<' => "&lt;",
             '>' => "&gt;",
             '"' => "&quot;",
             '\'' => "&#39;",
-            else => continue,
+            else => null,
         };
+        if (unsafe == 0 and entity == null) {
+            i += 1;
+            continue;
+        }
         try w.writeAll(text[start..i]);
-        try w.writeAll(entity);
-        start = i + 1;
+        if (entity) |found| {
+            try w.writeAll(found);
+            i += 1;
+        } else {
+            try output.writeUnsafe(w, text[i .. i + unsafe]);
+            i += unsafe;
+        }
+        start = i;
     }
     try w.writeAll(text[start..]);
 }
@@ -413,6 +427,9 @@ test "[edge] - [html]: values from the files cannot put markup into the page" {
     var out = std.Io.Writer.fixed(&buffer);
     try writeEscaped(&out, "<script>alert('x')</script>\" & ");
     try std.testing.expectEqualStrings("&lt;script&gt;alert(&#39;x&#39;)&lt;/script&gt;&quot; &amp; ", out.buffered());
+    out = std.Io.Writer.fixed(&buffer);
+    try writeEscaped(&out, "a\x1b[31mb\u{202e}c");
+    try std.testing.expectEqualStrings("a\\x1b[31mb\\u{202e}c", out.buffered());
 }
 
 test "[unit] - [html]: a differing record becomes one section with its rows and counts" {
