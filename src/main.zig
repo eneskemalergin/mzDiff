@@ -70,7 +70,7 @@ const USAGE =
     \\  -h, --help         this text
     \\
     \\A KEY is a PSI-MS accession (MS:1000016), user:NAME, @attribute, array:ACCESSION, or a
-    \\named check: id, indexed, indexListOffset, instrumentConfiguration, scan, element.
+    \\named check: id, order, indexed, indexListOffset, instrumentConfiguration, element.
     \\Exit status: 0 same or tolerated, 1 differs, 2 usage error or unreadable file.
     \\
 ;
