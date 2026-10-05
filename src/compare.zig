@@ -320,7 +320,7 @@ pub const NO_PARENT = std.math.maxInt(u32);
 /// unbounded memory.
 pub const Interner = struct {
     arena: std.heap.ArenaAllocator,
-    strings: std.StringHashMapUnmanaged(?Severity) = .empty,
+    strings: std.StringHashMapUnmanaged(?KeyInfo) = .empty,
     bytes: usize = 0,
     limit: usize = 8 << 20,
 
@@ -344,14 +344,38 @@ pub const Interner = struct {
         return copy;
     }
 
-    fn severity(self: *Interner, rules: *Rules, key: []const u8) Severity {
-        const cached = self.strings.getPtr(key) orelse return rules.severity(key);
+    fn info(self: *Interner, rules: *Rules, key: []const u8) KeyInfo {
+        const cached = self.strings.getPtr(key) orelse return KeyInfo.of(rules, key);
         if (cached.*) |found| return found;
-        const found = rules.severity(key);
+        const found = KeyInfo.of(rules, key);
         cached.* = found;
         return found;
     }
 };
+
+/// What the rules say about a key, looked up once per key and reader.
+const KeyInfo = struct {
+    severity: Severity,
+    /// The vocabulary types the key's value as an integer.
+    integer: bool,
+
+    fn of(rules: *Rules, key: []const u8) KeyInfo {
+        return .{ .severity = rules.severity(key), .integer = rules.integerTyped(key) };
+    }
+};
+
+fn inRecord(path: []const u8) bool {
+    return std.mem.startsWith(u8, path, "spectrum") or std.mem.startsWith(u8, path, "chromatogram");
+}
+
+// Whether `text` is an XSD integer: an optional sign and digits, around optional whitespace.
+fn integerSpelling(text: []const u8) bool {
+    const trimmed = std.mem.trim(u8, text, " \t\r\n");
+    const digits = if (trimmed.len != 0 and (trimmed[0] == '+' or trimmed[0] == '-')) trimmed[1..] else trimmed;
+    if (digits.len == 0) return false;
+    for (digits) |c| if (c < '0' or c > '9') return false;
+    return true;
+}
 
 pub const Collector = struct {
     arena: std.mem.Allocator,
@@ -371,9 +395,9 @@ pub const Collector = struct {
         return (try interner.get(text)) orelse try self.arena.dupe(u8, text);
     }
 
-    fn severityOf(self: *const Collector, key: []const u8) Severity {
-        const interner = self.interner orelse return self.rules.severity(key);
-        return interner.severity(self.rules, key);
+    fn infoOf(self: *const Collector, key: []const u8) KeyInfo {
+        const interner = self.interner orelse return KeyInfo.of(self.rules, key);
+        return interner.info(self.rules, key);
     }
 
     pub fn add(self: *const Collector, node: model.Node, prefix: []const u8, parent: u32) !void {
@@ -398,15 +422,16 @@ pub const Collector = struct {
             var key_buffer: [128]u8 = undefined;
             const probe = std.fmt.bufPrint(&key_buffer, "@{s}", .{attribute.name}) catch return error.AttributeNameTooLong;
             const key = if (self.interner != null) try self.stable(probe) else try self.arena.dupe(u8, probe);
-            if (self.severityOf(key) == .ignored) continue;
+            if (self.infoOf(key).severity == .ignored) continue;
             try self.facts.append(self.arena, makeFact(path, key, "", attribute.value, "", element));
         }
 
-        // Whether an element takes parameters through a group is a fact of its own (the group's id
-        // is bookkeeping): the parameters compare as if written inline, but some readers (Sage)
-        // ignore groups and miss what they hold.
-        for (node.params) |entry| if (entry == .group_ref) {
-            try self.facts.append(self.arena, makeFact(path, "referenceableParamGroupRef", "parameter group", "", "", element));
+        // Whether a spectrum or chromatogram takes parameters through a group is a fact of its own
+        // (the group's id is bookkeeping): the parameters compare as if written inline, but some
+        // readers (Sage) ignore groups and miss what they hold. The header's groups, which every
+        // header reader resolves, are not noted.
+        if (inRecord(path)) for (node.params) |entry| if (entry == .group_ref) {
+            try self.facts.append(self.arena, makeFact(path, "form:paramGroup", "parameters through a group", "", "", element));
             break;
         };
 
@@ -414,7 +439,12 @@ pub const Collector = struct {
         while (try params.next()) |entry| switch (entry) {
             .cv => |param| {
                 const key = try self.stable(if (param.accession) |accession| accession.raw else param.name orelse continue);
-                if (self.severityOf(key) == .ignored) continue;
+                // An integer-typed value spelled otherwise ("2.0" for a charge) is the same number,
+                // but outside the standard: readers that parse the declared type refuse the file.
+                const info = self.infoOf(key);
+                if (param.value) |value| if (info.integer and !integerSpelling(value))
+                    try self.facts.append(self.arena, makeFact(path, "form:integer", "integer value written otherwise", key, "", element));
+                if (info.severity == .ignored) continue;
                 try self.facts.append(self.arena, makeFact(
                     path,
                     key,
@@ -431,7 +461,7 @@ pub const Collector = struct {
                     try self.stable(std.fmt.bufPrint(&key_buffer, "user:{s}", .{name}) catch return error.ParameterNameTooLong)
                 else
                     try std.fmt.allocPrint(self.arena, "user:{s}", .{name});
-                if (self.severityOf(key) == .ignored) continue;
+                if (self.infoOf(key).severity == .ignored) continue;
                 try self.facts.append(self.arena, makeFact(
                     path,
                     key,
@@ -1691,6 +1721,11 @@ test "[unit] - [regrouping]: precursors in another order are reported, once" {
     try std.testing.expectEqual(Kind.element_order, classes[0].kind);
     try std.testing.expectEqual(Severity.major, classes[0].severity);
     try std.testing.expectEqualStrings("precursorOrder", classes[0].key);
+}
+
+test "[unit] - [form]: integers are an optional sign and digits only" {
+    for ([_][]const u8{ "2", "+2", "-3", " 17 ", "0" }) |text| try std.testing.expect(integerSpelling(text));
+    for ([_][]const u8{ "2.0", "2e0", "", "+", "two", "0x2" }) |text| try std.testing.expect(!integerSpelling(text));
 }
 
 test "[edge] - [report]: clipped examples end on a character boundary" {

@@ -26,7 +26,7 @@ on converter outputs instead and compares every spectrum with the reference's re
 Sage, the FASTA, and the engine settings suit Orbitrap HCD runs; the default FASTA is human.
 Writes OUT/consumer.tsv; the edited files are removed as soon as each case is done.
 """
-import argparse, base64, csv, json, os, re, shutil, struct, subprocess, sys, zlib
+import argparse, base64, csv, json, math, os, re, shutil, struct, subprocess, sys, zlib
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 SAGE = os.path.join(HERE, "..", "..", "mzBridge", "tools", "bin", "sage")
@@ -142,6 +142,54 @@ def wrap_base64(block):
         return "<binary>" + "\n".join(text[i:i + 76] for i in range(0, len(text), 76)) + "</binary>"
     return re.sub(r"<binary>(.*?)</binary>", wrap, block, count=1, flags=re.S)
 
+def numpress_nibbles(x):
+    """One residual in MS-Numpress's half-byte integer code."""
+    x &= 0xFFFFFFFF
+    mask = 0xF0000000
+    head = x & mask
+    if head == 0:
+        skip = next((i for i in range(8) if x & (mask >> (4 * i))), 8)
+        return [skip] + [(x >> (4 * j)) & 0xF for j in range(8 - skip)]
+    if head == mask:
+        skip = next((i for i in range(8) if x & (mask >> (4 * i)) != mask >> (4 * i)), 7)
+        return [skip + 8] + [(x >> (4 * j)) & 0xF for j in range(8 - skip)]
+    return [0] + [(x >> (4 * j)) & 0xF for j in range(8)]
+
+def numpress_linear(values):
+    """MS-Numpress linear prediction, as the reference implementation writes it."""
+    top = max(values[:2])
+    for i in range(2, len(values)):
+        guess = values[i - 1] + (values[i - 1] - values[i - 2])
+        top = max(top, math.ceil(abs(values[i] - guess) + 1))
+    fixed = math.floor(0x7FFFFFFF / top)
+    out = bytearray(struct.pack(">d", fixed))
+    ints = [int(v * fixed + 0.5) for v in values]
+    for v in ints[:2]:
+        out += struct.pack("<I", v)
+    nibbles = []
+    for i in range(2, len(ints)):
+        nibbles += numpress_nibbles(ints[i] - (2 * ints[i - 1] - ints[i - 2]))
+    if len(nibbles) % 2:
+        nibbles.append(0)
+    out += bytes((nibbles[i] << 4) | nibbles[i + 1] for i in range(0, len(nibbles), 2))
+    return bytes(out)
+
+def numpress_array(xml):
+    """The m/z array re-encoded in MS-Numpress linear (no zlib), its other parameters kept."""
+    values = decode(xml)
+    if len(values) < 3:
+        return xml
+    text = base64.b64encode(numpress_linear(values)).decode()
+    xml = re.sub(r"<binary>.*?</binary>", f"<binary>{text}</binary>", xml, flags=re.S)
+    xml = re.sub(r'encodedLength="\d+"', f'encodedLength="{len(text)}"', xml)
+    return re.sub(r'accession="MS:100057[46]" value="" name="[^"]*"', 'accession="MS:1002312" value="" name="MS-Numpress linear prediction compression"', xml)
+
+def numpress_mz(block):
+    for m in arrays(block):
+        if 'accession="MS:1000514"' in m.group(0):
+            return block[:m.start()] + numpress_array(m.group(0)) + block[m.end():]
+    return block
+
 def drop_top_peak(mz, inten):
     top = max(range(len(inten)), key=inten.__getitem__)
     return mz[:top] + mz[top + 1:], inten[:top] + inten[top + 1:]
@@ -234,6 +282,7 @@ CASES = [
     ("mz_32bit", with_arrays(lambda mz, i: (mz, i), bits=32, which={"mz"}), None),
     ("arrays_uncompressed", with_arrays(lambda mz, i: (mz, i), compressed=False), None),
     ("base64_wrapped", wrap_base64, None),
+    ("mz_numpress", numpress_mz, None),
     ("default_length_off", lambda b: re.sub(r'defaultArrayLength="(\d+)"', lambda m: f'defaultArrayLength="{int(m.group(1)) + 1}"', b, count=1), None),
     # Identity and container.
     ("native_id_scan_only", lambda b: re.sub(r'id="controllerType=0 controllerNumber=1 (scan=\d+)"', r'id="\1"', b, count=1), None),

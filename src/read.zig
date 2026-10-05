@@ -10,6 +10,7 @@ const std = @import("std");
 const zmz = @import("zmz");
 const mzml = zmz.mzml;
 const model = mzml.model;
+const cv = mzml.cv;
 
 const compare = @import("compare.zig");
 const rules_mod = @import("rules.zig");
@@ -234,6 +235,7 @@ fn makeItem(side: *Side, record: model.Record) !Item {
             try facts.append(arena, fact);
         }
     }
+    try noteArrayForm(&facts, arena, record.node, header.groups);
     const id = try arena.dupe(u8, record.id);
     return .{
         .kind = record.node.kind,
@@ -247,6 +249,28 @@ fn makeItem(side: *Side, record: model.Record) !Item {
         .owner = side,
     };
 }
+
+// Arrays in MS-Numpress, as a fact on the record (text and name are literals, so they outlive the
+// reader's record): the values compare the same, but readers without Numpress fail (Sage reads
+// the bytes as plain floats or drops the array). Base64 broken by whitespace is the other such
+// form, but zmz decodes the text as it streams and keeps none of it, so it is a zmz gap.
+fn noteArrayForm(facts: *std.ArrayList(Fact), arena: std.mem.Allocator, node: model.Node, groups: []const cv.Group) !void {
+    const list = node.child(.binary_data_array_list) orelse return;
+    for (list.children) |array| {
+        if (array.kind != .binary_data_array) continue;
+        var params: cv.EffectiveIterator = .{ .entries = array.params, .groups = groups };
+        while (params.next() catch null) |entry| {
+            if (entry != .cv) continue;
+            const accession = if (entry.cv.accession) |a| a.raw else continue;
+            for (NUMPRESS) |known| if (std.mem.eql(u8, accession, known)) {
+                return facts.append(arena, compare.makeFact(node.kind.xmlName(), "form:numpress", "arrays in MS-Numpress", "", "", 0));
+            };
+        }
+    }
+}
+
+// MS-Numpress linear, positive integer, and short logged float, alone and followed by zlib.
+const NUMPRESS = [_][]const u8{ "MS:1002312", "MS:1002313", "MS:1002314", "MS:1002746", "MS:1002747", "MS:1002748" };
 
 // A spectrum's scan nodes, in document order.
 const Scans = struct {

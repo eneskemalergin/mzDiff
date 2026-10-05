@@ -100,6 +100,16 @@ const EXACT = std.StaticStringMap(Severity).initComptime(.{
     .{ "indexListOffset", .major },
     // a scan naming a configuration the header lacks
     .{ "instrumentConfiguration", .major },
+
+    // How B wrote the data, where A wrote it otherwise and readers stumble. Outside the standard
+    // is critical: a reader parsing the declared type fails. Inside it but beyond what known
+    // readers handle is major (Sage ignores groups and cannot decode numpress).
+    // an integer-typed value written as something else ("2.0")
+    .{ "form:integer", .critical },
+    // a spectrum's or chromatogram's parameters taken through a group
+    .{ "form:paramGroup", .major },
+    // an array in MS-Numpress
+    .{ "form:numpress", .major },
     .{ "@startTimeStamp", .major },
 
     // Bookkeeping that differs between tools by design.
@@ -163,6 +173,13 @@ const ANCESTORS = [_]struct { []const u8, Severity }{
     .{ "MS:1000561", .ignored },
 };
 
+const INTEGER_TYPES = [_][]const u8{
+    "xsd:int",             "xsd:integer",            "xsd:long",            "xsd:short",
+    "xsd:byte",            "xsd:nonNegativeInteger", "xsd:positiveInteger", "xsd:nonPositiveInteger",
+    "xsd:negativeInteger", "xsd:unsignedInt",        "xsd:unsignedLong",    "xsd:unsignedShort",
+    "xsd:unsignedByte",
+};
+
 // The most accessions whose ancestry severity is remembered.
 const CACHE_LIMIT = 16384;
 
@@ -171,6 +188,7 @@ pub const Rules = struct {
     vocabulary: ?*const cv.Vocabulary,
     overrides: std.StringHashMapUnmanaged(Severity) = .empty,
     cache: std.StringHashMapUnmanaged(Severity) = .empty,
+    integers: std.StringHashMapUnmanaged(bool) = .empty,
 
     pub fn init(allocator: std.mem.Allocator) Rules {
         var vocabulary: ?*const cv.Vocabulary = null;
@@ -184,6 +202,9 @@ pub const Rules = struct {
         var keys = self.cache.keyIterator();
         while (keys.next()) |key| self.allocator.free(key.*);
         self.cache.deinit(self.allocator);
+        var integer_keys = self.integers.keyIterator();
+        while (integer_keys.next()) |key| self.allocator.free(key.*);
+        self.integers.deinit(self.allocator);
         var overrides = self.overrides.keyIterator();
         while (overrides.next()) |key| self.allocator.free(key.*);
         self.overrides.deinit(self.allocator);
@@ -224,6 +245,33 @@ pub const Rules = struct {
         const owned = self.allocator.dupe(u8, key) catch return found;
         self.cache.put(self.allocator, owned, found) catch self.allocator.free(owned);
         return found;
+    }
+
+    /// Whether every value type the bundled vocabulary gives `key` is an XSD integer type
+    /// (`charge state`, `ms level`), so a value spelled otherwise is outside the standard.
+    pub fn integerTyped(self: *Rules, key: []const u8) bool {
+        if (!std.mem.startsWith(u8, key, "MS:")) return false;
+        if (self.integers.get(key)) |found| return found;
+        const found = self.byValueType(key);
+        // Bounded like the severity cache.
+        if (self.integers.count() >= CACHE_LIMIT) return found;
+        const owned = self.allocator.dupe(u8, key) catch return found;
+        self.integers.put(self.allocator, owned, found) catch self.allocator.free(owned);
+        return found;
+    }
+
+    fn byValueType(self: *const Rules, accession: []const u8) bool {
+        const vocabulary = self.vocabulary orelse return false;
+        var slots: [8][]const u8 = undefined;
+        const types = vocabulary.valueTypes(accession, &slots, 1_000) catch return false;
+        if (types.len == 0) return false;
+        for (types) |value_type| {
+            const integer = for (INTEGER_TYPES) |known| {
+                if (std.mem.eql(u8, value_type, known)) break true;
+            } else false;
+            if (!integer) return false;
+        }
+        return true;
     }
 
     /// The term's name in the bundled vocabulary, or null for unknown accessions.
@@ -282,4 +330,16 @@ test "[unit] - [severity]: overrides win over every built-in rule" {
     defer rules.deinit();
     try rules.override("MS:1000511", .ignored);
     try std.testing.expectEqual(Severity.ignored, rules.severity("MS:1000511"));
+}
+
+test "[unit] - [types]: charge and ms level are integer typed, times and m/z are not" {
+    var rules = Rules.init(std.testing.allocator);
+    defer rules.deinit();
+    try std.testing.expect(rules.integerTyped("MS:1000041"));
+    try std.testing.expect(rules.integerTyped("MS:1000511"));
+    try std.testing.expect(!rules.integerTyped("MS:1000016"));
+    try std.testing.expect(!rules.integerTyped("MS:1000744"));
+    try std.testing.expect(!rules.integerTyped("user:charge"));
+    // Answered again from the cache.
+    try std.testing.expect(rules.integerTyped("MS:1000041"));
 }

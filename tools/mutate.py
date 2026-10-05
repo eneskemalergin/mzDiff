@@ -16,6 +16,8 @@ Exit status: 0 when every case that ran behaved as expected, 1 otherwise.
 """
 import base64, re, struct, subprocess, sys, os, tempfile, zlib
 
+import consumer
+
 
 class Skip(Exception):
     """The reference has no structure for this case."""
@@ -254,6 +256,22 @@ def ms_level_in_group(t):
     blk = blk[:line.start()] + '          <referenceableParamGroupRef ref="mutateMsLevel" />\n' + blk[line.end():]
     return t[:a0] + blk + t[a1:]
 
+# Form: the same data written so some readers fail. mzdiff must report it itself, not leave it
+# to mzValidate.
+
+def in_spectrum(t, scan, edit, what):
+    a0, a1 = spectrum_block(t, scan)
+    blk = edit(t[a0:a1])
+    if blk == t[a0:a1]:
+        raise Skip(f"scan {scan} has no {what}")
+    return t[:a0] + blk + t[a1:]
+
+def charge_spelled(t):
+    return param_value(t, 5, "MS:1000041", lambda v: v + ".0")
+
+def mz_numpress(t):
+    return in_spectrum(t, 5, consumer.numpress_mz, "m/z array")
+
 # Meaning-preserving edits: mzdiff must report nothing above minor.
 
 def same_param_order(t):
@@ -365,7 +383,9 @@ CASES = [
     ("same_number_spelling", same_number_spelling, None),
     ("same_value_whitespace", same_value_whitespace, None),
     ("same_seconds", same_seconds, None),
-    ("ms_level_in_group", ms_level_in_group, "minor:extra"),
+    ("ms_level_in_group", ms_level_in_group, "form:paramGroup"),
+    ("charge_spelled", charge_spelled, "form:integer"),
+    ("mz_numpress", mz_numpress, "form:numpress"),
     ("same_uncompressed", same_uncompressed, None),
     ("same_float32", same_float32, "minor:precision"),
     ("peaks_reversed", same_peak_order, "array:peaks"),
