@@ -120,6 +120,9 @@ pub const Report = struct {
     record: usize = 0,
     /// Paths with a real difference in the current record (set by `diffFacts`).
     dirty: std.ArrayList([]const u8) = .empty,
+    // Scratch for `sortFacts`, reused across records.
+    runs: std.ArrayList(Run) = .empty,
+    reordered: std.ArrayList(Fact) = .empty,
     /// Sees every difference before it is filed, for `--list`.
     sink: ?Sink = null,
 
@@ -145,6 +148,8 @@ pub const Report = struct {
         }
         self.classes.deinit(self.allocator);
         self.dirty.deinit(self.allocator);
+        self.runs.deinit(self.allocator);
+        self.reordered.deinit(self.allocator);
     }
 
     /// Like `add`, and marks the path as holding a real difference in this record.
@@ -457,8 +462,8 @@ fn unitOf(unit: anytype) []const u8 {
 /// The paths of real differences (not tolerance-level ones) are kept in `report.dirty`.
 pub fn diffFacts(report: *Report, id: []const u8, a: []Fact, b: []Fact) !void {
     report.dirty.clearRetainingCapacity();
-    std.mem.sort(Fact, a, {}, factLess);
-    std.mem.sort(Fact, b, {}, factLess);
+    try sortFacts(report, a);
+    try sortFacts(report, b);
     var i: usize = 0;
     var j: usize = 0;
     while (i < a.len or j < b.len) {
@@ -485,7 +490,7 @@ pub fn diffFacts(report: *Report, id: []const u8, a: []Fact, b: []Fact) !void {
 /// Sorts and drops exact repeats (same path, key, value, unit): header facts compare as a set,
 /// so a model named once per instrument configuration is not a count difference.
 pub fn dedupe(facts: []Fact) []Fact {
-    std.mem.sort(Fact, facts, {}, factLess);
+    std.mem.sortUnstable(Fact, facts, {}, factLess);
     var kept: usize = 0;
     for (facts) |fact| {
         if (kept > 0) {
@@ -498,15 +503,60 @@ pub fn dedupe(facts: []Fact) []Fact {
     return facts[0..kept];
 }
 
+const Run = struct { path: []const u8, start: usize, end: usize };
+
+// Sorts facts by `factLess`, using the order they arrive in: a record's facts come grouped by
+// element, so sorting the runs of one path (a dozen or so) and then each path's facts by key costs
+// far fewer comparisons than sorting them all at once. The result is the same order.
+fn sortFacts(report: *Report, facts: []Fact) !void {
+    const allocator = report.allocator;
+    report.runs.clearRetainingCapacity();
+    var start: usize = 0;
+    while (start < facts.len) {
+        var end = start + 1;
+        while (end < facts.len and sameText(facts[end].path, facts[start].path)) end += 1;
+        try report.runs.append(allocator, .{ .path = facts[start].path, .start = start, .end = end });
+        start = end;
+    }
+    const runs = report.runs.items;
+    if (runs.len > 1) {
+        std.mem.sortUnstable(Run, runs, {}, struct {
+            fn less(_: void, x: Run, y: Run) bool {
+                return orderText(x.path, y.path) == .lt;
+            }
+        }.less);
+        report.reordered.clearRetainingCapacity();
+        try report.reordered.ensureTotalCapacity(allocator, facts.len);
+        for (runs) |run| report.reordered.appendSliceAssumeCapacity(facts[run.start..run.end]);
+        @memcpy(facts, report.reordered.items);
+    }
+    // Each path's facts, now adjacent (repeated elements included), by key and value.
+    start = 0;
+    while (start < facts.len) {
+        var end = start + 1;
+        while (end < facts.len and sameText(facts[end].path, facts[start].path)) end += 1;
+        if (end - start > 1) std.mem.sortUnstable(Fact, facts[start..end], {}, factLess);
+        start = end;
+    }
+}
+
+// A total order: by path, key, value (numbers first, NaN after other numbers), text, then unit.
 fn factLess(_: void, x: Fact, y: Fact) bool {
     var order = orderText(x.path, y.path);
     if (order != .eq) return order == .lt;
     order = orderText(x.key, y.key);
     if (order != .eq) return order == .lt;
-    if (x.number != null and y.number != null) return x.number.? < y.number.?;
-    if (x.number != null) return true;
-    if (y.number != null) return false;
-    return std.mem.order(u8, x.text, y.text) == .lt;
+    if (x.number != null and y.number != null) {
+        const p = x.number.?;
+        const q = y.number.?;
+        if (std.math.isNan(p) != std.math.isNan(q)) return std.math.isNan(q);
+        if (p != q and !std.math.isNan(p)) return p < q;
+    } else if (x.number != null or y.number != null) {
+        return x.number != null;
+    }
+    order = std.mem.order(u8, x.text, y.text);
+    if (order != .eq) return order == .lt;
+    return std.mem.order(u8, x.unit, y.unit) == .lt;
 }
 
 // Interned strings of one side are the same pointer, which settles most comparisons at once.
@@ -1210,6 +1260,37 @@ test "[unit] - [arrays]: peaks in the same order are not reordered when an inten
         .{ .key = "array:MS:1000515", .values = .{ .float64 = &intensity_reversed } },
     };
     try std.testing.expect(try samePeaks(arena.allocator(), &a, &c));
+}
+
+test "[property] - [facts]: sorting by path runs gives the same order as one full sort" {
+    const allocator = std.testing.allocator;
+    var rules = Rules.init(allocator);
+    defer rules.deinit();
+    var report = Report.init(allocator, &rules, 3);
+    defer report.deinit();
+    const ion = "spectrum/precursor/selectedIon";
+    // Two repeated elements, a path that returns after another, and ties broken by text and unit.
+    const facts = [_]Fact{
+        makeFact("spectrum", "MS:1000511", "", "2", "", 0),
+        makeFact(ion, "MS:1000744", "", "641.29", "", 1),
+        makeFact(ion, "MS:1000041", "", "2", "", 1),
+        makeFact("spectrum/scan", "MS:1000016", "", "1.5", MINUTE, 2),
+        makeFact(ion, "MS:1000744", "", "427.53", "", 3),
+        makeFact(ion, "MS:1000041", "", "3", "", 3),
+        makeFact("spectrum", "MS:1000285", "", "nan", "", 0),
+        makeFact("spectrum", "MS:1000285", "", "17442.45", "", 0),
+        makeFact("spectrum", "user:note", "", "b", "", 0),
+        makeFact("spectrum", "user:note", "", "a", "", 0),
+    };
+    var by_runs = facts;
+    var full = facts;
+    try sortFacts(&report, &by_runs);
+    std.mem.sortUnstable(Fact, &full, {}, factLess);
+    for (by_runs, full) |x, y| {
+        try std.testing.expectEqualStrings(y.path, x.path);
+        try std.testing.expectEqualStrings(y.key, x.key);
+        try std.testing.expectEqualStrings(y.text, x.text);
+    }
 }
 
 test "[unit] - [facts]: facts compare by value whatever the spelling and order" {
