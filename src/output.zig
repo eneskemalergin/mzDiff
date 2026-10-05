@@ -1,7 +1,7 @@
 //! Renders a comparison for people and for programs: the report (difference classes with
 //! examples), the summary (the verdict and its counts), the list (every difference, streamed as it
 //! is found), each as text, TSV, or JSON, and the view (a git-style diff of the differing records,
-//! for people only).
+//! unified or side by side, for people only).
 //!
 //! What is shown never changes the verdict: `Selection` narrows the report's classes and the
 //! list's lines, while `Outcome` (status, completion, totals) always describes the whole
@@ -329,13 +329,18 @@ pub const Lister = struct {
     }
 };
 
+pub const Layout = enum { unified, side_by_side };
+
 /// Renders the differing records as a git-style diff: a header per record, the element path, then
-/// `-` for A and `+` for B (`~` when the difference is within a tolerance). The text is built in a bounded buffer while the comparison runs; when more than `records`
+/// `-` for A and `+` for B (`~` when the difference is within a tolerance), or two columns side by
+/// side. The text is built in a bounded buffer while the comparison runs; when more than `records`
 /// records differ or the text passes `bytes`, `finish` refuses to show it and says how to narrow it.
 pub const Viewer = struct {
     out: *std.Io.Writer,
     style: Style,
     selection: Selection,
+    layout: Layout = .unified,
+    width: usize = 160,
     records: usize = 40,
     bytes: usize = 1 << 20,
     buffer: std.Io.Writer.Allocating,
@@ -402,7 +407,10 @@ pub const Viewer = struct {
             try self.dim(w, false);
             try w.writeByte('\n');
         }
-        try self.unified(w, difference);
+        switch (self.layout) {
+            .unified => try self.unified(w, difference),
+            .side_by_side => try self.sideBySide(w, difference),
+        }
         if (self.buffer.written().len > self.bytes) self.drop();
     }
 
@@ -438,6 +446,16 @@ pub const Viewer = struct {
         try w.print("{s}", .{record});
         if (self.style.color) try w.writeAll("\x1b[0m");
         try w.writeByte('\n');
+        if (self.layout == .side_by_side) {
+            const column = self.columnWidth();
+            try w.writeAll("  ");
+            try self.dim(w, true);
+            try writePadded(w, "", 41);
+            try writePadded(w, "A", column);
+            try w.writeAll(" | B");
+            try self.dim(w, false);
+            try w.writeByte('\n');
+        }
     }
 
     fn unified(self: *Viewer, w: *std.Io.Writer, difference: Difference) !void {
@@ -498,6 +516,38 @@ pub const Viewer = struct {
         try w.writeByte('\n');
     }
 
+    fn sideBySide(self: *Viewer, w: *std.Io.Writer, difference: Difference) !void {
+        const column = self.columnWidth();
+        const tolerated = isTolerance(difference.kind);
+        var label_buffer: [160]u8 = undefined;
+        try w.writeAll("  ");
+        try writePadded(w, describe(&label_buffer, difference), 40);
+        try w.writeByte(' ');
+        if (self.style.color) try w.writeAll(if (tolerated) "\x1b[33m" else "\x1b[31m");
+        try writePadded(w, sideValue(difference, .a), column);
+        if (self.style.color) try w.writeAll("\x1b[0m");
+        try w.writeAll(" | ");
+        if (self.style.color) try w.writeAll(if (tolerated) "\x1b[33m" else "\x1b[32m");
+        try writePadded(w, sideValue(difference, .b), column);
+        if (self.style.color) try w.writeAll("\x1b[0m");
+        try self.tag(w, difference);
+        if (difference.array) |array| {
+            try w.writeAll("  ");
+            try writePadded(w, "", 40);
+            try self.dim(w, true);
+            try w.print(" {d} of {d} values differ", .{ array.differing, array.values });
+            if (array.largest != array.shown) try writeLargest(w, array);
+            try self.dim(w, false);
+            try w.writeByte('\n');
+        }
+    }
+
+    // Each value column's width: what the terminal leaves after the name and the tag.
+    fn columnWidth(self: *const Viewer) usize {
+        const fixed = 2 + 40 + 1 + 3 + 32;
+        return @max(16, (self.width -| fixed) / 2);
+    }
+
     fn dim(self: *const Viewer, w: *std.Io.Writer, on: bool) !void {
         if (self.style.color) try w.writeAll(if (on) "\x1b[2m" else "\x1b[0m");
     }
@@ -550,6 +600,15 @@ fn writeLargest(w: *std.Io.Writer, array: compare.ArrayDetail) !void {
     try w.print("; largest at [{d}]: {d} against {d}", .{ array.largest, array.largest_a, array.largest_b });
 }
 
+// One side's column: its value, "(present)" for a term with no value that only this side has, or
+// "-" for nothing.
+fn sideValue(difference: Difference, side: Viewer.Which) []const u8 {
+    const value = if (side == .a) difference.a else difference.b;
+    if (value.len != 0) return value;
+    const here: compare.Kind = if (side == .a) .missing else .extra;
+    return if (difference.kind == here) "(present)" else "-";
+}
+
 fn isTolerance(kind: compare.Kind) bool {
     return switch (kind) {
         .narrow, .rounding, .ppm, .precision, .peak_order => true,
@@ -573,6 +632,19 @@ fn describe(buffer: []u8, difference: Difference) []const u8 {
         else => null,
     };
     return if (aspect) |what| std.fmt.bufPrint(buffer, "{s} ({s})", .{ name, what }) catch name else name;
+}
+
+// `text` cut or padded to exactly `width` bytes, so the columns line up (cut at a UTF-8 boundary).
+fn writePadded(out: *std.Io.Writer, text: []const u8, width: usize) !void {
+    if (text.len <= width) {
+        try out.writeAll(text);
+        try out.splatByteAll(' ', width - text.len);
+        return;
+    }
+    var end = width -| 3;
+    while (end > 0 and text[end] & 0xC0 == 0x80) end -= 1;
+    try out.writeAll(text[0..end]);
+    try out.splatByteAll('.', width - end);
 }
 
 fn writeHeadText(out: *std.Io.Writer, style: Style, outcome: Outcome) !void {

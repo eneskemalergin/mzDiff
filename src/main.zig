@@ -45,6 +45,8 @@ const USAGE =
     \\  --json             JSON: one document, or JSON Lines with --list
     \\  --tsv              tab-separated rows
     \\  --color WHEN       auto (default), always, or never; text only
+    \\  --side-by-side     with --view: A and B in two columns
+    \\  --width N          with --side-by-side: the line width (default COLUMNS, else 160)
     \\
     \\Narrow what is shown (never the verdict):
     \\  --severity LEVEL   critical, major, or minor and above (default minor)
@@ -77,6 +79,8 @@ const Options = struct {
     mode: output.Mode = .report,
     format: output.Format = .text,
     color: Color = .auto,
+    layout: output.Layout = .unified,
+    width: ?usize = null,
     selection: output.Selection = .{},
     examples: usize = 3,
     fail_on: Severity = .major,
@@ -96,7 +100,7 @@ pub fn main(init: std.process.Init) u8 {
     var rules = Rules.init(allocator);
     defer rules.deinit();
     var problem: []const u8 = "";
-    const options = parse(arena, args, &rules, &problem) catch |err| switch (err) {
+    var options = parse(arena, args, &rules, &problem) catch |err| switch (err) {
         error.Help => {
             std.Io.File.stdout().writeStreamingAll(io, USAGE) catch {};
             return 0;
@@ -109,6 +113,7 @@ pub fn main(init: std.process.Init) u8 {
             return 2;
         },
     };
+    if (options.width == null) options.width = terminalWidth(init.environ_map);
     const style: output.Style = .{ .color = options.format == .text and useColor(io, init.environ_map, options.color) };
     const interactive = std.Io.File.stdout().isTty(io) catch false;
     var out_buffer: [64 * 1024]u8 = undefined;
@@ -123,6 +128,13 @@ pub fn main(init: std.process.Init) u8 {
     };
     out.flush() catch return if (brokenPipe(&stdout)) 0 else 2;
     return if (status == .differs) 1 else 0;
+}
+
+// The side-by-side width: COLUMNS when the shell exports it, else 160.
+fn terminalWidth(environ: *const std.process.Environ.Map) usize {
+    const text = environ.get("COLUMNS") orelse return 160;
+    const width = std.fmt.parseInt(usize, text, 10) catch return 160;
+    return @max(width, 80);
 }
 
 fn brokenPipe(writer: *const std.Io.File.Writer) bool {
@@ -187,6 +199,7 @@ fn parse(arena: std.mem.Allocator, args: []const []const u8, rules: *Rules, prob
     var format_flag: ?[]const u8 = null;
     var selection_flag: ?[]const u8 = null;
     var list_flag: ?[]const u8 = null;
+    var view_flag: ?[]const u8 = null;
     var examples_set = false;
     while (p.i < args.len) : (p.i += 1) {
         const arg = args[p.i];
@@ -205,6 +218,12 @@ fn parse(arena: std.mem.Allocator, args: []const []const u8, rules: *Rules, prob
                 "--color takes auto, always, or never, not '{s}'",
                 .{text},
             );
+        } else if (std.mem.eql(u8, arg, "--side-by-side")) {
+            options.layout = .side_by_side;
+            view_flag = arg;
+        } else if (std.mem.eql(u8, arg, "--width")) {
+            options.width = try p.count(arg);
+            view_flag = arg;
         } else if (std.mem.eql(u8, arg, "--severity")) {
             options.selection.severity = try p.level(arg, try p.value(arg), false);
             selection_flag = arg;
@@ -250,6 +269,9 @@ fn parse(arena: std.mem.Allocator, args: []const []const u8, rules: *Rules, prob
         .report, .list => {},
     }
     if (options.mode != .list and options.mode != .view) if (list_flag) |flag| return p.fail("{s} works with --list or --view", .{flag});
+    if (options.mode != .view) if (view_flag) |flag| return p.fail("{s} works with --view", .{flag});
+    if (options.mode == .view and options.layout == .unified and options.width != null)
+        return p.fail("--width works with --side-by-side", .{});
     if (options.mode != .report and examples_set) return p.fail("--examples applies to the report only", .{});
     options.a = files[0];
     options.b = files[1];
@@ -730,6 +752,8 @@ fn run(
     if (options.mode == .list) report.sink = lister.sink();
     var viewer = output.Viewer.init(allocator, out, style, options.selection);
     defer viewer.deinit();
+    viewer.layout = options.layout;
+    viewer.width = options.width orelse 160;
     if (options.selection.limit) |limit| viewer.records = limit;
     if (options.mode == .view) report.sink = viewer.sink();
     // B's broken index trailer is a difference, reported whether or not the header is compared; the
@@ -1042,6 +1066,8 @@ test "[unit] - [arguments]: each mode, format, and selection combines only where
         .{ .args = &.{ "--summary", "--severity", "major" }, .problem = "--summary counts everything, so --severity does not apply" },
         .{ .args = &.{ "--limit", "5" }, .problem = "--limit works with --list or --view" },
         .{ .args = &.{ "--view", "--json" }, .problem = "--view is for people; for programs, use --list --json" },
+        .{ .args = &.{"--side-by-side"}, .problem = "--side-by-side works with --view" },
+        .{ .args = &.{ "--view", "--width", "120" }, .problem = "--width works with --side-by-side" },
         .{ .args = &.{ "--list", "--examples", "2" }, .problem = "--examples applies to the report only" },
         .{ .args = &.{ "--severity", "ignored" }, .problem = "--severity takes critical, major, or minor, not 'ignored'" },
         .{ .args = &.{ "--set", "MS:1000511" }, .problem = "--set takes KEY=LEVEL, not 'MS:1000511'" },
