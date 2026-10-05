@@ -289,6 +289,46 @@ pub const NO_PARENT = std.math.maxInt(u32);
 /// Collects the facts of a node and its children. Binary arrays are left to `compareArrays`; the
 /// elements in `skip` (header lists) are left out with their children. With `elements`, each
 /// element visited is listed and each fact names its element.
+/// Strings that repeat across one side's records (element paths, keys, names, units), copied once
+/// and shared by every fact after, with each key's severity looked up once. One per reading thread,
+/// so it needs no lock; its strings live until `deinit`. Past `limit` bytes it takes no new strings
+/// and `get` returns null, so a file with endless distinct keys costs per-record copies, not
+/// unbounded memory.
+pub const Interner = struct {
+    arena: std.heap.ArenaAllocator,
+    strings: std.StringHashMapUnmanaged(?Severity) = .empty,
+    bytes: usize = 0,
+    limit: usize = 8 << 20,
+
+    pub fn init(allocator: std.mem.Allocator) Interner {
+        return .{ .arena = .init(allocator) };
+    }
+
+    pub fn deinit(self: *Interner) void {
+        self.arena.deinit();
+    }
+
+    /// Returns the shared copy of `text`, or null once the interner is full.
+    pub fn get(self: *Interner, text: []const u8) !?[]const u8 {
+        if (self.strings.getKey(text)) |found| return found;
+        // The map's own entries count too, roughly.
+        if (self.bytes + text.len + 32 > self.limit) return null;
+        const arena = self.arena.allocator();
+        const copy = try arena.dupe(u8, text);
+        try self.strings.put(arena, copy, null);
+        self.bytes += text.len + 32;
+        return copy;
+    }
+
+    fn severity(self: *Interner, rules: *Rules, key: []const u8) Severity {
+        const cached = self.strings.getPtr(key) orelse return rules.severity(key);
+        if (cached.*) |found| return found;
+        const found = rules.severity(key);
+        cached.* = found;
+        return found;
+    }
+};
+
 pub const Collector = struct {
     arena: std.mem.Allocator,
     rules: *Rules,
@@ -296,12 +336,31 @@ pub const Collector = struct {
     elements: ?*std.ArrayList(Element) = null,
     groups: []const cv.Group,
     skip: []const model.Kind = &.{},
+    /// When set, every fact's path, key, name, and unit is a stable copy (shared or in `arena`);
+    /// only its text still borrows from the record.
+    interner: ?*Interner = null,
+
+    // A stable copy of a repeating string: shared when the interner has room, else in the arena.
+    // Without an interner the string is returned as it is, borrowed.
+    fn stable(self: *const Collector, text: []const u8) ![]const u8 {
+        const interner = self.interner orelse return text;
+        return (try interner.get(text)) orelse try self.arena.dupe(u8, text);
+    }
+
+    fn severityOf(self: *const Collector, key: []const u8) Severity {
+        const interner = self.interner orelse return self.rules.severity(key);
+        return interner.severity(self.rules, key);
+    }
 
     pub fn add(self: *const Collector, node: model.Node, prefix: []const u8, parent: u32) !void {
         for (self.skip) |kind| if (node.kind == kind) return;
         if (node.kind == .binary_data_array_list or node.kind == .binary) return;
+        var path_buffer: [512]u8 = undefined;
         const path = if (prefix.len == 0)
             node.kind.xmlName()
+        else if (self.interner != null)
+            try self.stable(std.fmt.bufPrint(&path_buffer, "{s}/{s}", .{ prefix, node.kind.xmlName() }) catch
+                return error.ElementPathTooLong)
         else
             try std.fmt.allocPrint(self.arena, "{s}/{s}", .{ prefix, node.kind.xmlName() });
         var element: u32 = 0;
@@ -314,34 +373,39 @@ pub const Collector = struct {
             if (attribute.namespace_uri != null) continue;
             var key_buffer: [128]u8 = undefined;
             const probe = std.fmt.bufPrint(&key_buffer, "@{s}", .{attribute.name}) catch return error.AttributeNameTooLong;
-            if (self.rules.severity(probe) == .ignored) continue;
-            try self.facts.append(self.arena, makeFact(path, try self.arena.dupe(u8, probe), "", attribute.value, "", element));
+            const key = if (self.interner != null) try self.stable(probe) else try self.arena.dupe(u8, probe);
+            if (self.severityOf(key) == .ignored) continue;
+            try self.facts.append(self.arena, makeFact(path, key, "", attribute.value, "", element));
         }
 
         var params: cv.EffectiveIterator = .{ .entries = node.params, .groups = self.groups };
         while (try params.next()) |entry| switch (entry) {
             .cv => |param| {
-                const key = if (param.accession) |accession| accession.raw else param.name orelse continue;
-                if (self.rules.severity(key) == .ignored) continue;
+                const key = try self.stable(if (param.accession) |accession| accession.raw else param.name orelse continue);
+                if (self.severityOf(key) == .ignored) continue;
                 try self.facts.append(self.arena, makeFact(
                     path,
                     key,
-                    param.name orelse "",
+                    try self.stable(param.name orelse ""),
                     param.value orelse "",
-                    unitOf(param.unit),
+                    try self.stable(unitOf(param.unit)),
                     element,
                 ));
             },
             .user => |param| {
                 const name = param.name orelse continue;
-                const key = try std.fmt.allocPrint(self.arena, "user:{s}", .{name});
-                if (self.rules.severity(key) == .ignored) continue;
+                var key_buffer: [256]u8 = undefined;
+                const key = if (self.interner != null)
+                    try self.stable(std.fmt.bufPrint(&key_buffer, "user:{s}", .{name}) catch return error.ParameterNameTooLong)
+                else
+                    try std.fmt.allocPrint(self.arena, "user:{s}", .{name});
+                if (self.severityOf(key) == .ignored) continue;
                 try self.facts.append(self.arena, makeFact(
                     path,
                     key,
-                    name,
+                    try self.stable(name),
                     param.value orelse "",
-                    unitOf(param.unit),
+                    try self.stable(unitOf(param.unit)),
                     element,
                 ));
             },
@@ -364,17 +428,6 @@ pub fn collect(
 ) !void {
     const collector: Collector = .{ .arena = arena, .rules = rules, .facts = facts, .groups = groups, .skip = skip };
     try collector.add(node, prefix, NO_PARENT);
-}
-
-/// A copy of `fact` whose text lives in `arena`.
-pub fn ownFact(arena: std.mem.Allocator, fact: Fact) !Fact {
-    var copy = fact;
-    copy.path = try arena.dupe(u8, fact.path);
-    copy.key = try arena.dupe(u8, fact.key);
-    copy.name = try arena.dupe(u8, fact.name);
-    copy.text = try arena.dupe(u8, fact.text);
-    copy.unit = try arena.dupe(u8, fact.unit);
-    return copy;
 }
 
 /// A fact with its value parsed; times in seconds become minutes.
@@ -446,9 +499,9 @@ pub fn dedupe(facts: []Fact) []Fact {
 }
 
 fn factLess(_: void, x: Fact, y: Fact) bool {
-    var order = std.mem.order(u8, x.path, y.path);
+    var order = orderText(x.path, y.path);
     if (order != .eq) return order == .lt;
-    order = std.mem.order(u8, x.key, y.key);
+    order = orderText(x.key, y.key);
     if (order != .eq) return order == .lt;
     if (x.number != null and y.number != null) return x.number.? < y.number.?;
     if (x.number != null) return true;
@@ -456,8 +509,18 @@ fn factLess(_: void, x: Fact, y: Fact) bool {
     return std.mem.order(u8, x.text, y.text) == .lt;
 }
 
+// Interned strings of one side are the same pointer, which settles most comparisons at once.
+fn orderText(a: []const u8, b: []const u8) std.math.Order {
+    if (a.ptr == b.ptr and a.len == b.len) return .eq;
+    return std.mem.order(u8, a, b);
+}
+
+fn sameText(a: []const u8, b: []const u8) bool {
+    return (a.ptr == b.ptr and a.len == b.len) or std.mem.eql(u8, a, b);
+}
+
 fn sameGroup(x: Fact, y: Fact) bool {
-    return std.mem.eql(u8, x.path, y.path) and std.mem.eql(u8, x.key, y.key);
+    return sameText(x.path, y.path) and sameText(x.key, y.key);
 }
 
 fn groupLess(x: Fact, y: Fact) bool {
