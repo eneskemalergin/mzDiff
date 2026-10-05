@@ -21,6 +21,7 @@ const mzml = zmz.mzml;
 const model = mzml.model;
 
 const compare = @import("compare.zig");
+const output = @import("output.zig");
 const rules_mod = @import("rules.zig");
 
 const Fact = compare.Fact;
@@ -793,6 +794,7 @@ fn match(list: []Item, x: *const Item, how: Match) ?*Item {
 
 test {
     _ = compare;
+    _ = output;
     _ = rules_mod;
 }
 
