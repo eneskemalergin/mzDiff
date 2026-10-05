@@ -1056,6 +1056,15 @@ test "[unit] - [arguments]: each mode, format, and selection combines only where
     try std.testing.expectEqualStrings("MS:1000016", options.selection.keys[0]);
 }
 
+test "[unit] - [pairing]: native ids with the same fields pair by the whole id" {
+    try std.testing.expect(sameIdFields("controllerType=0 controllerNumber=1 scan=5", "controllerType=0 controllerNumber=1 scan=9"));
+    try std.testing.expect(sameIdFields("function=2 process=0 scan=1", "function=3 process=0 scan=1"));
+    try std.testing.expect(sameIdFields("sample=1 period=1 cycle=22 experiment=1", "sample=1 period=1 cycle=3 experiment=2"));
+    try std.testing.expect(!sameIdFields("controllerType=0 controllerNumber=1 scan=5", "scan=5"));
+    try std.testing.expect(!sameIdFields("scan=19", "sample=1 period=1 cycle=22 experiment=1"));
+    try std.testing.expect(!sameIdFields("index=3", "index"));
+}
+
 test "[unit] - [pairing]: scan numbers come from the native id" {
     try std.testing.expectEqual(@as(?u64, 42), scanNumber("controllerType=0 controllerNumber=1 scan=42"));
     try std.testing.expectEqual(@as(?u64, null), scanNumber("index=3"));
