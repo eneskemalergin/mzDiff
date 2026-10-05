@@ -973,26 +973,32 @@ fn firstMismatch(a: mzml.DecodedArrays.Values, b: mzml.DecodedArrays.Values, ppm
     return result;
 }
 
-// Whether both records hold the same (m/z, intensity) pairs in another order.
+// Whether both records hold the same (m/z, intensity) pairs in another order. Pairs already in
+// the same order are not reordered, even when they differ below 32-bit precision.
 fn samePeaks(arena: std.mem.Allocator, arrays_a: []const Role, arrays_b: []const Role) !bool {
     const pa = try pairs(arena, arrays_a) orelse return false;
     const pb = try pairs(arena, arrays_b) orelse return false;
-    if (pa.len != pb.len) return false;
-    for (pa, pb) |x, y| if (x[0] != y[0] or x[1] != y[1]) return false;
+    if (pa.len != pb.len or samePairs(pa, pb)) return false;
+    for ([_][][2]f32{ pa, pb }) |list| std.mem.sort([2]f32, list, {}, struct {
+        fn less(_: void, x: [2]f32, y: [2]f32) bool {
+            return if (x[0] != y[0]) x[0] < y[0] else x[1] < y[1];
+        }
+    }.less);
+    return samePairs(pa, pb);
+}
+
+fn samePairs(a: []const [2]f32, b: []const [2]f32) bool {
+    for (a, b) |x, y| if (x[0] != y[0] or x[1] != y[1]) return false;
     return true;
 }
 
+// The record's (m/z, intensity) pairs at 32-bit precision, in array order.
 fn pairs(arena: std.mem.Allocator, list: []const Role) !?[][2]f32 {
     const mz = (find(list, "array:MS:1000514") orelse return null).values;
     const intensity = (find(list, "array:MS:1000515") orelse return null).values;
     if (len(mz) != len(intensity)) return null;
     const out = try arena.alloc([2]f32, len(mz));
     for (out, 0..) |*pair, i| pair.* = .{ @floatCast(valueAt(mz, i)), @floatCast(valueAt(intensity, i)) };
-    std.mem.sort([2]f32, out, {}, struct {
-        fn less(_: void, x: [2]f32, y: [2]f32) bool {
-            return if (x[0] != y[0]) x[0] < y[0] else x[1] < y[1];
-        }
-    }.less);
     return out;
 }
 
@@ -1033,6 +1039,31 @@ test "[edge] - [values]: equal NaNs compare as the same and NaN against a number
     const c = [_]f64{ 1, 1 };
     try std.testing.expectEqual(@as(?usize, null), firstMismatch(.{ .float64 = &a }, .{ .float64 = &b }, 0).exact);
     try std.testing.expectEqual(@as(?usize, 0), firstMismatch(.{ .float64 = &a }, .{ .float64 = &c }, 0).beyond);
+}
+
+test "[unit] - [arrays]: peaks in the same order are not reordered when an intensity narrows" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const mz = [_]f64{ 100, 200, 300 };
+    const intensity_a = [_]f64{ 10, 20, 30 };
+    // Below 32-bit precision: equal as 32-bit floats, different as 64-bit ones.
+    const intensity_b = [_]f64{ 10, 20 * (1 + 5e-9), 30 };
+    const a = [_]Role{
+        .{ .key = "array:MS:1000514", .values = .{ .float64 = &mz } },
+        .{ .key = "array:MS:1000515", .values = .{ .float64 = &intensity_a } },
+    };
+    const b = [_]Role{
+        .{ .key = "array:MS:1000514", .values = .{ .float64 = &mz } },
+        .{ .key = "array:MS:1000515", .values = .{ .float64 = &intensity_b } },
+    };
+    try std.testing.expect(!try samePeaks(arena.allocator(), &a, &b));
+    const mz_reversed = [_]f64{ 300, 200, 100 };
+    const intensity_reversed = [_]f64{ 30, 20, 10 };
+    const c = [_]Role{
+        .{ .key = "array:MS:1000514", .values = .{ .float64 = &mz_reversed } },
+        .{ .key = "array:MS:1000515", .values = .{ .float64 = &intensity_reversed } },
+    };
+    try std.testing.expect(try samePeaks(arena.allocator(), &a, &c));
 }
 
 test "[unit] - [facts]: facts compare by value whatever the spelling and order" {
