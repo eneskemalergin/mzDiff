@@ -71,9 +71,11 @@ convert() { # raw output.mzML
     mzbridge) "$repo/zig-out/bin/mzBridge" convert "$1" "$2" ;;
     opentfraw) "$repo/tools/bin/to_mzml" --indexed "$1" "$2" > /dev/null ;;
     mzdata)
-      "$repo/tools/bin/mzdata-converter" -o "$scratch/mzdata" "$1" > /dev/null
-      mv "$scratch/mzdata/$(basename "${1%.*}").mzML" "$2"
-      rmdir "$scratch/mzdata" ;;
+      # Chained: under `if ! convert`, set -e is off, and a converter that fails after writing a
+      # partial file must still fail the conversion.
+      "$repo/tools/bin/mzdata-converter" -o "$scratch/mzdata" "$1" > /dev/null &&
+        mv "$scratch/mzdata/$(basename "${1%.*}").mzML" "$2" &&
+        rmdir "$scratch/mzdata" ;;
   esac
 }
 
@@ -135,7 +137,10 @@ for raw in "${files[@]}"; do
   fi
   start=$(date +%s.%N)
   if ! convert "$raw" "$mzml" 2> "$scratch/err"; then
-    printf '%s\tconvert failed: %s\t\t\t\t\t\t\n' "$name" "$(tr '\n\t' '  ' < "$scratch/err" | cut -c1-120)" >> "$summary"
+    # The reason, not the banner: skip progress lines and a panic's location line.
+    reason=$(grep -v -e 'panicked at' -e '^Found [0-9]* file' -e '^note: run with' -e '^[[:space:]]*$' "$scratch/err" | head -1 || true)
+    [ -n "$reason" ] || reason=$(tr '\n\t' '  ' < "$scratch/err")
+    printf '%s\tconvert failed: %s\t\t\t\t\t\t\n' "$name" "$(printf '%s' "$reason" | tr '\t' ' ' | cut -c1-160)" >> "$summary"
     rm -f "$mzml" "$scratch/err"
     continue
   fi

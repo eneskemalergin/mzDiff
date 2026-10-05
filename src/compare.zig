@@ -3,7 +3,8 @@
 //! Each side becomes a list of facts: (element path, key, value, unit) for every attribute,
 //! cvParam, and userParam, with group references expanded. Facts are sorted and compared per
 //! (path, key), so parameter order, attribute order, whitespace, number spelling ("50" and
-//! "50.000"), and the order of repeated elements do not matter. Scan times in seconds are compared
+//! "50.000"), and the order of repeated elements do not matter, except a spectrum's precursors,
+//! whose order says which stage each one is. Scan times in seconds are compared
 //! in minutes. Arrays are compared as decoded values, at 32-bit precision when either side stores
 //! 32 bits. Every difference is filed under a class (severity, kind, path, key) in a `Report`.
 
@@ -37,6 +38,7 @@ pub const Kind = enum {
     id_mismatch,
     regrouped,
     order,
+    element_order,
 
     pub fn label(self: Kind) []const u8 {
         return switch (self) {
@@ -59,6 +61,7 @@ pub const Kind = enum {
             .id_mismatch => "paired ids differ",
             .regrouped => "values regrouped",
             .order => "records out of order",
+            .element_order => "in another order",
         };
     }
 };
@@ -199,7 +202,8 @@ pub const Report = struct {
         b: []const u8,
         array: ?ArrayDetail,
     ) !void {
-        var level = severity orelse self.rules.severity(key);
+        // `--set` wins even over a severity the check chose itself (a tolerance, a lost record).
+        var level = self.rules.overridden(key) orelse severity orelse self.rules.severity(key);
         if (level == .ignored) return;
         // fileContent summarises the spectra, which are compared themselves.
         if (level == .critical and std.mem.indexOf(u8, path, "fileContent") != null) level = .major;
@@ -397,6 +401,14 @@ pub const Collector = struct {
             if (self.severityOf(key) == .ignored) continue;
             try self.facts.append(self.arena, makeFact(path, key, "", attribute.value, "", element));
         }
+
+        // Whether an element takes parameters through a group is a fact of its own (the group's id
+        // is bookkeeping): the parameters compare as if written inline, but some readers (Sage)
+        // ignore groups and miss what they hold.
+        for (node.params) |entry| if (entry == .group_ref) {
+            try self.facts.append(self.arena, makeFact(path, "referenceableParamGroupRef", "parameter group", "", "", element));
+            break;
+        };
 
         var params: cv.EffectiveIterator = .{ .entries = node.params, .groups = self.groups };
         while (try params.next()) |entry| switch (entry) {
@@ -600,6 +612,15 @@ fn groupEnd(facts: []const Fact, start: usize) usize {
     return end;
 }
 
+// A total ion current of zero where A has one: readers take it for an empty spectrum and skip it
+// (Sage drops the spectrum without a word), so the spectrum is lost to them, not just a value.
+fn emptied(x: Fact, y: Fact) ?Severity {
+    if (!std.mem.eql(u8, x.key, "MS:1000285")) return null;
+    const p = x.number orelse return null;
+    const q = y.number orelse return null;
+    return if (q == 0 and p != 0) .critical else null;
+}
+
 fn diffGroup(report: *Report, id: []const u8, a: []const Fact, b: []const Fact) !void {
     const first = a[0];
     if (a.len != b.len) {
@@ -632,17 +653,21 @@ fn diffGroup(report: *Report, id: []const u8, a: []const Fact, b: []const Fact) 
         }
         switch (compareValues(report.ppm, x, y)) {
             .same => {},
-            .different => try report.addDirty(null, .value, x.path, x.key, x.name, id, x.text, y.text),
+            .different => try report.addDirty(emptied(x, y), .value, x.path, x.key, x.name, id, x.text, y.text),
             inline else => |kind| try report.add(.minor, @field(Kind, @tagName(kind)), x.path, x.key, x.name, id, x.text, y.text),
         }
     }
 }
 
 // A unit on one side only leaves the value as it was. One B adds is minor (mzValidate judges
-// whether the term allows it); one B drops costs readers the unit, never more than major.
+// whether the term allows it); one B drops costs readers the unit: never more than major, except
+// for a time, which means nothing without one.
 fn oneSidedUnit(report: *Report, key: []const u8, unit_a: []const u8) Severity {
     if (unit_a.len == 0) return .minor;
     const level = report.rules.severity(key);
+    // A time without its unit could be seconds or minutes, and readers refuse it or misread it
+    // sixtyfold; any other unit is implied by the term, so dropping it costs at most major.
+    if (std.mem.eql(u8, unit_a, MINUTE) or std.mem.eql(u8, unit_a, SECOND)) return level;
     return if (level == .critical) .major else level;
 }
 
@@ -782,12 +807,25 @@ pub fn diffGrouping(
         const index = try scratch.alloc(Hashed, groups_b.len);
         for (groups_b, index, 0..) |group, *entry, at| entry.* = .{ .hash = subtreeHash(group.items), .at = at };
         std.mem.sortUnstable(Hashed, index, {}, Hashed.less);
+        var moved = false;
+        var unmatched: ?usize = null;
         for (groups_a, 0..) |group, position_a| {
-            if (matchExact(report.ppm, group.items, groups_b, index, taken)) continue;
-            if (matchNear(report.ppm, group.items, groups_b, taken, position_a)) continue;
-            try reportRegrouped(report, scratch, id, element.path, group.items, groups_b, taken);
+            const at = matchExact(report.ppm, group.items, groups_b, index, taken) orelse
+                matchNear(report.ppm, group.items, groups_b, taken, position_a) orelse {
+                unmatched = position_a;
+                break;
+            };
+            moved = moved or at != position_a;
+        }
+        if (unmatched) |position_a| {
+            try reportRegrouped(report, scratch, id, element.path, groups_a[position_a].items, groups_b, taken);
             try filed.append(scratch, element.path);
-            break;
+        } else if (moved and ordered(element.path)) {
+            // The same elements in another order, where the order carries meaning: shown by the
+            // m/z of the first one on each side, the one a reader takes.
+            const first_a = try firstMz(scratch, groups_a[0].items);
+            const first_b = try firstMz(scratch, groups_b[0].items);
+            try report.add(null, .element_order, element.path, "precursorOrder", "precursors", id, first_a, first_b);
         }
     }
     for (elements_b, 0..) |element, position| {
@@ -819,7 +857,7 @@ fn subtreeHash(facts: []const Fact) u64 {
     return hasher.final();
 }
 
-fn matchExact(ppm: f64, group: []const Fact, groups: []const std.ArrayList(Fact), index: []const Hashed, taken: []bool) bool {
+fn matchExact(ppm: f64, group: []const Fact, groups: []const std.ArrayList(Fact), index: []const Hashed, taken: []bool) ?usize {
     const hash = subtreeHash(group);
     var low: usize = 0;
     var high: usize = index.len;
@@ -831,9 +869,9 @@ fn matchExact(ppm: f64, group: []const Fact, groups: []const std.ArrayList(Fact)
         const at = index[low].at;
         if (taken[at] or !sameSubtree(ppm, group, groups[at].items)) continue;
         taken[at] = true;
-        return true;
+        return at;
     }
-    return false;
+    return null;
 }
 
 // Elements of B that match only within a tolerance this many places either side of the same
@@ -841,7 +879,7 @@ fn matchExact(ppm: f64, group: []const Fact, groups: []const std.ArrayList(Fact)
 // linear however many elements repeat.
 const NEAR = 512;
 
-fn matchNear(ppm: f64, group: []const Fact, groups: []const std.ArrayList(Fact), taken: []bool, position: usize) bool {
+fn matchNear(ppm: f64, group: []const Fact, groups: []const std.ArrayList(Fact), taken: []bool, position: usize) ?usize {
     var distance: usize = 0;
     while (distance <= NEAR) : (distance += 1) {
         const before: ?usize = if (position >= distance) position - distance else null;
@@ -850,10 +888,21 @@ fn matchNear(ppm: f64, group: []const Fact, groups: []const std.ArrayList(Fact),
             const at = candidate orelse continue;
             if (at >= groups.len or taken[at] or !sameSubtree(ppm, group, groups[at].items)) continue;
             taken[at] = true;
-            return true;
+            return at;
         }
     }
-    return false;
+    return null;
+}
+
+fn firstMz(scratch: std.mem.Allocator, facts: []const Fact) ![]const u8 {
+    for (facts) |fact| if (std.mem.eql(u8, fact.key, "MS:1000744")) return std.fmt.allocPrint(scratch, "first at m/z {s}", .{fact.text});
+    return "";
+}
+
+// Repeated elements whose order carries meaning: a spectrum's precursors run from the nearest
+// stage back, and readers take the first as the precursor of the spectrum.
+fn ordered(path: []const u8) bool {
+    return std.mem.eql(u8, path, "spectrum/precursorList/precursor");
 }
 
 fn under(paths: []const []const u8, path: []const u8) bool {
@@ -1072,7 +1121,10 @@ pub fn compareArrays(
             if (!order_checked) {
                 order_checked = true;
                 reordered = try samePeaks(arena, arrays_a, arrays_b);
-                if (reordered) try report.add(.minor, .peak_order, path, "array:peaks", "m/z and intensity pairs", id, "", "");
+                // Not a tolerance: readers that deisotope or search the peaks assume rising m/z, and
+                // Sage matches other peptides when they fall instead, so the order is a difference
+                // at the arrays' severity (major, `--set array:peaks=...`).
+                if (reordered) try report.add(null, .peak_order, path, "array:peaks", "m/z and intensity pairs", id, "", "");
             }
             if (reordered) continue;
         }
@@ -1433,22 +1485,26 @@ test "[edge] - [values]: seconds read as minutes keep the precision they were pr
     try std.testing.expect(compareValues(1, a, c) != .different);
 }
 
-test "[unit] - [facts]: a unit b drops is at most major and one b adds is minor" {
+test "[unit] - [facts]: a unit b drops is at most major, except a time's, and one b adds is minor" {
     const allocator = std.testing.allocator;
     var rules = Rules.init(allocator);
     defer rules.deinit();
-    // Scan start time is critical, so a dropped unit shows the cap; the value itself matches.
-    const cases = [_]struct { a: []const u8, b: []const u8, severity: Severity }{
-        .{ .a = MINUTE, .b = "", .severity = .major },
-        .{ .a = "", .b = MINUTE, .severity = .minor },
-        // In seconds on one side only, the printed values still match.
-        .{ .a = SECOND, .b = "", .severity = .major },
+    const MZ = "MS:1000040";
+    // Both keys are critical; the values match, so only the unit differs.
+    const cases = [_]struct { key: []const u8, a: []const u8, b: []const u8, severity: Severity }{
+        // m/z is the selected ion's only unit: dropping it shows the cap.
+        .{ .key = "MS:1000744", .a = MZ, .b = "", .severity = .major },
+        .{ .key = "MS:1000744", .a = "", .b = MZ, .severity = .minor },
+        // A time without its unit could be seconds or minutes.
+        .{ .key = "MS:1000016", .a = MINUTE, .b = "", .severity = .critical },
+        .{ .key = "MS:1000016", .a = SECOND, .b = "", .severity = .critical },
+        .{ .key = "MS:1000016", .a = "", .b = MINUTE, .severity = .minor },
     };
     for (cases) |case| {
         var report = Report.init(allocator, &rules, 3);
         defer report.deinit();
-        var a = [_]Fact{makeFact("spectrum/scan", "MS:1000016", "", "1.5", case.a, 0)};
-        var b = [_]Fact{makeFact("spectrum/scan", "MS:1000016", "", "1.5", case.b, 0)};
+        var a = [_]Fact{makeFact("spectrum/scan", case.key, "", "1.5", case.a, 0)};
+        var b = [_]Fact{makeFact("spectrum/scan", case.key, "", "1.5", case.b, 0)};
         try diffFacts(&report, "scan=1", &a, &b);
         const classes = try report.sorted(allocator);
         defer allocator.free(classes);
@@ -1456,6 +1512,44 @@ test "[unit] - [facts]: a unit b drops is at most major and one b adds is minor"
         try std.testing.expectEqual(Kind.unit, classes[0].kind);
         try std.testing.expectEqual(case.severity, classes[0].severity);
     }
+}
+
+test "[unit] - [facts]: a total ion current that drops to zero is critical, other changes major" {
+    const allocator = std.testing.allocator;
+    var rules = Rules.init(allocator);
+    defer rules.deinit();
+    const cases = [_]struct { b: []const u8, severity: Severity }{
+        .{ .b = "0", .severity = .critical },
+        .{ .b = "0.0", .severity = .critical },
+        .{ .b = "1492781.9", .severity = .major },
+    };
+    for (cases) |case| {
+        var report = Report.init(allocator, &rules, 3);
+        defer report.deinit();
+        var a = [_]Fact{makeFact("spectrum", "MS:1000285", "", "746390.94", "", 0)};
+        var b = [_]Fact{makeFact("spectrum", "MS:1000285", "", case.b, "", 0)};
+        try diffFacts(&report, "scan=1", &a, &b);
+        const classes = try report.sorted(allocator);
+        defer allocator.free(classes);
+        try std.testing.expectEqual(@as(usize, 1), classes.len);
+        try std.testing.expectEqual(case.severity, classes[0].severity);
+    }
+}
+
+test "[unit] - [report]: --set wins over a severity the check chose itself" {
+    const allocator = std.testing.allocator;
+    var rules = Rules.init(allocator);
+    defer rules.deinit();
+    try rules.override("array:MS:1000515", .ignored);
+    try rules.override("MS:1000285", .minor);
+    var report = Report.init(allocator, &rules, 3);
+    defer report.deinit();
+    try report.add(.minor, .precision, "spectrum", "array:MS:1000515", "", "scan=1", "float64", "float32");
+    try report.add(.critical, .value, "spectrum", "MS:1000285", "", "scan=1", "746390.94", "0");
+    const classes = try report.sorted(allocator);
+    defer allocator.free(classes);
+    try std.testing.expectEqual(@as(usize, 1), classes.len);
+    try std.testing.expectEqual(Severity.minor, classes[0].severity);
 }
 
 test "[unit] - [regrouping]: values that trade places between repeated elements are found" {
@@ -1561,6 +1655,42 @@ test "[edge] - [regrouping]: the same elements in another order are not regroupe
     try diffFacts(&report, "scan=1", &a, &b);
     try diffGrouping(&report, scratch.allocator(), "scan=1", &a, &elements, &b, &elements);
     try std.testing.expectEqual(@as(usize, 0), report.classes.count());
+}
+
+test "[unit] - [regrouping]: precursors in another order are reported, once" {
+    const allocator = std.testing.allocator;
+    var rules = Rules.init(allocator);
+    defer rules.deinit();
+    var report = Report.init(allocator, &rules, 3);
+    defer report.deinit();
+    var scratch = std.heap.ArenaAllocator.init(allocator);
+    defer scratch.deinit();
+    const precursor = "spectrum/precursorList/precursor";
+    const ion = "spectrum/precursorList/precursor/selectedIonList/selectedIon";
+    const elements = [_]Element{
+        .{ .path = "spectrum", .parent = NO_PARENT },
+        .{ .path = precursor, .parent = 0 },
+        .{ .path = ion, .parent = 1 },
+        .{ .path = precursor, .parent = 0 },
+        .{ .path = ion, .parent = 3 },
+    };
+    var a = [_]Fact{
+        makeFact(ion, "MS:1000744", "", "641.29", "", 2), makeFact(ion, "MS:1000041", "", "2", "", 2),
+        makeFact(ion, "MS:1000744", "", "427.53", "", 4), makeFact(ion, "MS:1000041", "", "3", "", 4),
+    };
+    // The MS1 precursor first: a reader taking the first precursor gets 427.53 at charge 3.
+    var b = [_]Fact{
+        makeFact(ion, "MS:1000744", "", "427.53", "", 2), makeFact(ion, "MS:1000041", "", "3", "", 2),
+        makeFact(ion, "MS:1000744", "", "641.29", "", 4), makeFact(ion, "MS:1000041", "", "2", "", 4),
+    };
+    try diffFacts(&report, "scan=1", &a, &b);
+    try diffGrouping(&report, scratch.allocator(), "scan=1", &a, &elements, &b, &elements);
+    const classes = try report.sorted(allocator);
+    defer allocator.free(classes);
+    try std.testing.expectEqual(@as(usize, 1), classes.len);
+    try std.testing.expectEqual(Kind.element_order, classes[0].kind);
+    try std.testing.expectEqual(Severity.major, classes[0].severity);
+    try std.testing.expectEqualStrings("precursorOrder", classes[0].key);
 }
 
 test "[edge] - [report]: clipped examples end on a character boundary" {

@@ -233,6 +233,27 @@ def param_value(t, scan, accession, change):
         raise Skip(f"scan {scan} has no {accession}")
     return t[:a0] + blk[:m.start(1)] + change(m.group(1)) + blk[m.end(1):] + t[a1:]
 
+def tic_zero(t):
+    # Readers take a zero total ion current for an empty spectrum; Sage drops the spectrum.
+    return param_value(t, 5, "MS:1000285", lambda v: "0")
+
+def ms_level_in_group(t):
+    # The same parameters through a group: the values match, but some readers (Sage) ignore groups.
+    m = re.search(r'<referenceableParamGroupList count="(\d+)">\n', t)
+    if not m:
+        raise Skip("the reference has no parameter group list")
+    group = ('      <referenceableParamGroup id="mutateMsLevel">\n'
+             '        <cvParam cvRef="MS" accession="MS:1000511" value="2" name="ms level" />\n'
+             '      </referenceableParamGroup>\n')
+    t = t[:m.start()] + f'<referenceableParamGroupList count="{int(m.group(1)) + 1}">\n' + group + t[m.end():]
+    a0, a1 = spectrum_block(t, 5)
+    blk = t[a0:a1]
+    line = re.search(r'[ \t]*<cvParam [^>]*accession="MS:1000511" value="2"[^>]*/>\n', blk)
+    if not line:
+        raise Skip("scan 5 is not ms level 2")
+    blk = blk[:line.start()] + '          <referenceableParamGroupRef ref="mutateMsLevel" />\n' + blk[line.end():]
+    return t[:a0] + blk + t[a1:]
+
 # Meaning-preserving edits: mzdiff must report nothing above minor.
 
 def same_param_order(t):
@@ -327,6 +348,7 @@ CASES = [
     ("chrom_time_unit", chrom_time_unit, "array:MS:1000595"),
     ("chrom_type_change", chrom_type_change, "MS:1000628"),
     ("sst_unit_dropped", sst_unit_dropped, "MS:1000016"),
+    ("tic_zero", tic_zero, "MS:1000285"),
     ("sst_coarse", sst_coarse, "MS:1000016"),
     ("value_case", value_case, "MS:1000512"),
     ("ic_ref", ic_ref, "instrumentConfiguration"),
@@ -336,16 +358,17 @@ CASES = [
     ("scan_id_format", scan_id_format, "@id"),
     ("swap_precursor_charge", swap_precursor_charge, "MS:1000041"),
     ("swap_precursor_energy", swap_precursor_energy, "MS:1000045"),
-    ("reorder_precursors", reorder_precursors, None),
+    ("reorder_precursors", reorder_precursors, "precursorOrder"),
     # Meaning-preserving edits.
     ("same_param_order", same_param_order, None),
     ("same_attribute_order", same_attribute_order, None),
     ("same_number_spelling", same_number_spelling, None),
     ("same_value_whitespace", same_value_whitespace, None),
     ("same_seconds", same_seconds, None),
+    ("ms_level_in_group", ms_level_in_group, "minor:extra"),
     ("same_uncompressed", same_uncompressed, None),
     ("same_float32", same_float32, "minor:precision"),
-    ("same_peak_order", same_peak_order, "minor:peak_order"),
+    ("peaks_reversed", same_peak_order, "array:peaks"),
     # Each tolerance, just inside (minor) and just outside (reported).
     ("mz_param_inside", mz_param_inside, "minor:ppm"),
     ("mz_param_outside", mz_param_outside, "MS:1000504"),

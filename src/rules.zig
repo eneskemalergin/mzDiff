@@ -90,6 +90,8 @@ const EXACT = std.StaticStringMap(Severity).initComptime(.{
     .{ "@spectrumRef", .major },
     // spectra paired out of their files' order
     .{ "order", .major },
+    // a spectrum's precursors in another order: the first is the one readers take
+    .{ "precursorOrder", .major },
     // the native id of spectra paired by scan number
     .{ "id", .major },
     // the indexedmzML wrapper, present or not
@@ -203,6 +205,11 @@ pub const Rules = struct {
         const entry = try self.overrides.getOrPut(self.allocator, owned);
         if (entry.found_existing) self.allocator.free(owned);
         entry.value_ptr.* = level;
+    }
+
+    /// The severity `--set` gave `key`, which wins over any a check chooses itself.
+    pub fn overridden(self: *const Rules, key: []const u8) ?Severity {
+        return self.overrides.get(key);
     }
 
     pub fn severity(self: *Rules, key: []const u8) Severity {

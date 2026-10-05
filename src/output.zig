@@ -656,7 +656,7 @@ fn sideValue(difference: Difference, side: Viewer.Which) []const u8 {
 
 pub fn isTolerance(kind: compare.Kind) bool {
     return switch (kind) {
-        .narrow, .rounding, .ppm, .precision, .peak_order => true,
+        .narrow, .rounding, .ppm, .precision => true,
         else => false,
     };
 }
@@ -674,6 +674,7 @@ pub fn describe(buffer: []u8, difference: Difference) []const u8 {
         .count, .peak_count => "count",
         .precision => "precision",
         .regrouped => "grouping",
+        .element_order => "order",
         else => null,
     };
     return if (aspect) |what| std.fmt.bufPrint(buffer, "{s} ({s})", .{ name, what }) catch name else name;
