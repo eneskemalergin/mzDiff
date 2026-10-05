@@ -796,7 +796,7 @@ test {
     _ = rules_mod;
 }
 
-test "scan numbers come from the native id" {
+test "[unit] - [pairing]: scan numbers come from the native id" {
     try std.testing.expectEqual(@as(?u64, 42), scanNumber("controllerType=0 controllerNumber=1 scan=42"));
     try std.testing.expectEqual(@as(?u64, null), scanNumber("index=3"));
 }

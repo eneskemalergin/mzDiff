@@ -972,12 +972,12 @@ fn pairs(arena: std.mem.Allocator, list: []const Role) !?[][2]f32 {
 
 // --- Tests ---
 
-test "timestamps differing only in trailing zeros are equal" {
+test "[edge] - [values]: timestamps differing only in trailing zeros are equal" {
     try std.testing.expectEqualStrings(trimFraction("2015-10-14T03:22:49.63Z"), trimFraction("2015-10-14T03:22:49.630Z"));
     try std.testing.expectEqualStrings("2015-10-14T03:22:49", trimFraction("2015-10-14T03:22:49.000Z"));
 }
 
-test "last digit differences are rounding, larger ones are not" {
+test "[unit] - [values]: last-digit differences are rounding, larger ones are not" {
     try std.testing.expect(lastDigit("79.106", "79.107", 79.106, 79.107, 1, 1));
     try std.testing.expect(!lastDigit("0.5", "0.75", 0.5, 0.75, 1, 1));
     try std.testing.expect(!lastDigit("79", "80", 79, 80, 1, 1));
@@ -989,13 +989,13 @@ test "last digit differences are rounding, larger ones are not" {
     try std.testing.expect(!lastDigit("6.5", "7", 6.5, 7, 1, 1));
 }
 
-test "values equal at 32-bit precision are told apart from real differences" {
+test "[unit] - [values]: values equal at 32-bit precision are told apart from real differences" {
     try std.testing.expect(sameAt32(573.290283203125, 573.2902916127172));
     try std.testing.expect(!sameAt32(573.2903, 573.2911));
     try std.testing.expect(sameAt32(0.1853804976, 0.1853804886341095));
 }
 
-test "facts compare by value whatever the spelling and order" {
+test "[unit] - [facts]: facts compare by value whatever the spelling and order" {
     const allocator = std.testing.allocator;
     var rules = Rules.init(allocator);
     defer rules.deinit();
@@ -1013,7 +1013,7 @@ test "facts compare by value whatever the spelling and order" {
     try std.testing.expectEqual(@as(usize, 0), report.classes.count());
 }
 
-test "a missing parameter and a changed value are filed with their severity" {
+test "[unit] - [facts]: a missing parameter and a changed value are filed with their severity" {
     const allocator = std.testing.allocator;
     var rules = Rules.init(allocator);
     defer rules.deinit();
@@ -1031,7 +1031,7 @@ test "a missing parameter and a changed value are filed with their severity" {
     for (classes) |class| try std.testing.expectEqual(Severity.critical, class.severity);
 }
 
-test "seconds read as minutes keep the precision they were printed with" {
+test "[edge] - [values]: seconds read as minutes keep the precision they were printed with" {
     // 3000.12 s is 50.002 min; "50.1" min is 5.9 s away, far beyond the last printed digit.
     const a = makeFact("spectrum/scan", "MS:1000016", "", "3000.12", SECOND, 0);
     const b = makeFact("spectrum/scan", "MS:1000016", "", "50.1", MINUTE, 0);
@@ -1040,7 +1040,7 @@ test "seconds read as minutes keep the precision they were printed with" {
     try std.testing.expect(compareValues(1, a, c) != .different);
 }
 
-test "a unit on one side only is a difference" {
+test "[unit] - [facts]: a unit on one side only is a difference" {
     const allocator = std.testing.allocator;
     var rules = Rules.init(allocator);
     defer rules.deinit();
@@ -1055,7 +1055,7 @@ test "a unit on one side only is a difference" {
     try std.testing.expectEqual(Kind.unit, classes[0].kind);
 }
 
-test "values that trade places between repeated elements are found" {
+test "[unit] - [regrouping]: values that trade places between repeated elements are found" {
     const allocator = std.testing.allocator;
     var rules = Rules.init(allocator);
     defer rules.deinit();
@@ -1088,7 +1088,7 @@ test "values that trade places between repeated elements are found" {
     try std.testing.expectEqualStrings("MS:1000041", classes[0].key);
 }
 
-test "the same elements in another order are not regrouped" {
+test "[edge] - [regrouping]: the same elements in another order are not regrouped" {
     const allocator = std.testing.allocator;
     var rules = Rules.init(allocator);
     defer rules.deinit();
@@ -1115,7 +1115,7 @@ test "the same elements in another order are not regrouped" {
     try std.testing.expectEqual(@as(usize, 0), report.classes.count());
 }
 
-test "clipped examples end on a character boundary" {
+test "[edge] - [report]: clipped examples end on a character boundary" {
     const text = "a" ** 159 ++ "é";
     try std.testing.expectEqual(@as(usize, 159), clip(text).len);
 }

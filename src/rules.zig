@@ -237,7 +237,7 @@ pub const Rules = struct {
 
 // --- Tests ---
 
-test "exact keys win over ancestry and the default" {
+test "[unit] - [severity]: exact keys win over ancestry and the default" {
     var rules = Rules.init(std.testing.allocator);
     defer rules.deinit();
     try std.testing.expectEqual(Severity.critical, rules.severity("MS:1000511"));
@@ -246,7 +246,7 @@ test "exact keys win over ancestry and the default" {
     try std.testing.expectEqual(Severity.major, rules.severity("array:MS:1000617"));
 }
 
-test "ancestry classifies activation methods, polarity and models" {
+test "[unit] - [severity]: ancestry classifies activation methods, polarity, and models" {
     var rules = Rules.init(std.testing.allocator);
     defer rules.deinit();
     try std.testing.expect(rules.vocabulary != null);
@@ -262,7 +262,7 @@ test "ancestry classifies activation methods, polarity and models" {
     try std.testing.expectEqual(Severity.ignored, rules.severity("MS:1000574"));
 }
 
-test "overrides win over everything" {
+test "[unit] - [severity]: overrides win over every built-in rule" {
     var rules = Rules.init(std.testing.allocator);
     defer rules.deinit();
     try rules.override("MS:1000511", .ignored);
