@@ -4,7 +4,9 @@
 usage: ./mutate.py MZDIFF REFERENCE.mzML [CASE...]
 
 Each case names the key of the critical or major class it must raise, `exit 2` when the file must
-fail to read, or nothing when B must compare the same (a non-defect, or a defect mzValidate owns).
+fail to read, `minor:KIND` when it must raise that minor kind and nothing more serious (a
+tolerance at work), or nothing when B must compare exactly the same (a non-defect, or a defect
+mzValidate owns).
 An edit that shifts bytes also breaks the index offset; that `indexListOffset` class is ignored
 unless the case is about the trailer. A case whose structure the reference lacks is skipped.
 The PRM fixture (PXD006618/1fmol_HSP90_SILpepmix_PRM.mzML) has every single-precursor structure;
@@ -12,7 +14,7 @@ an MS3 reference with two precursors per spectrum (PXD070648) has the multi-prec
 
 Exit status: 0 when every case that ran behaved as expected, 1 otherwise.
 """
-import re, subprocess, sys, os, tempfile
+import base64, re, struct, subprocess, sys, os, tempfile, zlib
 
 
 class Skip(Exception):
@@ -163,6 +165,122 @@ def reorder_precursors(t):
     first, second = blk[starts[0]:starts[1]], blk[starts[1]:end]
     return t[:i] + blk[:starts[0]] + second.rstrip() + "\n" + first.rstrip() + blk[end:] + t[e:]
 
+def array_in(t, scan, accession):
+    a0, a1 = spectrum_block(t, scan)
+    for m in re.finditer(r"<binaryDataArray .*?</binaryDataArray>", t[a0:a1], re.S):
+        if f'accession="{accession}"' in m.group(0):
+            return a0 + m.start(), a0 + m.end(), m.group(0)
+    raise Skip(f"scan {scan} has no {accession} array")
+
+def with_array(t, scan, accession, change, bits=None, compressed=None):
+    """Decodes one array, applies `change` to its values, and encodes it again, optionally at
+    other precision or compression."""
+    start, end, xml = array_in(t, scan, accession)
+    old_bits = 64 if "MS:1000523" in xml else 32 if "MS:1000521" in xml else None
+    if old_bits is None:
+        raise Skip(f"{accession} array is not 32- or 64-bit float")
+    old_zlib = "MS:1000574" in xml
+    payload = re.search(r"<binary>(.*?)</binary>", xml, re.S).group(1)
+    raw = base64.b64decode(payload)
+    raw = zlib.decompress(raw) if old_zlib else raw
+    values = list(struct.unpack(f"<{len(raw) // (old_bits // 8)}{'d' if old_bits == 64 else 'f'}", raw))
+    values = change(values)
+    bits = bits or old_bits
+    compressed = old_zlib if compressed is None else compressed
+    raw = struct.pack(f"<{len(values)}{'d' if bits == 64 else 'f'}", *values)
+    encoded = base64.b64encode(zlib.compress(raw) if compressed else raw).decode()
+    xml = re.sub(r"<binary>.*?</binary>", f"<binary>{encoded}</binary>", xml, flags=re.S)
+    xml = re.sub(r'encodedLength="\d+"', f'encodedLength="{len(encoded)}"', xml)
+    precision = {64: ('MS:1000523', '64-bit float'), 32: ('MS:1000521', '32-bit float')}
+    xml = re.sub(r'accession="MS:100052[13]" value="" name="[^"]*"', 'accession="%s" value="" name="%s"' % precision[bits], xml)
+    if old_zlib and not compressed:
+        xml = xml.replace('accession="MS:1000574" value="" name="zlib compression"', 'accession="MS:1000576" value="" name="no compression"')
+    return t[:start] + xml + t[end:]
+
+def scale_at(values, at, factor):
+    values[at] *= factor
+    return values
+
+def param_value(t, scan, accession, change):
+    a0, a1 = spectrum_block(t, scan)
+    blk = t[a0:a1]
+    m = re.search(rf'accession="{accession}" value="([^"]*)"', blk)
+    if not m:
+        raise Skip(f"scan {scan} has no {accession}")
+    return t[:a0] + blk[:m.start(1)] + change(m.group(1)) + blk[m.end(1):] + t[a1:]
+
+# Meaning-preserving edits: mzdiff must report nothing above minor.
+
+def same_param_order(t):
+    a0, a1 = spectrum_block(t, 5)
+    lines = t[a0:a1].split("\n")
+    top = [i for i, l in enumerate(lines) if re.match(r"^ {10}<cvParam ", l)]
+    if len(top) < 2:
+        raise Skip("scan 5 has fewer than two spectrum-level parameters")
+    params = [lines[i] for i in top][::-1]
+    for i, line in zip(top, params):
+        lines[i] = line
+    return t[:a0] + "\n".join(lines) + t[a1:]
+
+def same_attribute_order(t):
+    a0, a1 = spectrum_block(t, 5)
+    blk = t[a0:a1]
+    m = re.match(r'(\s*)<spectrum (id="[^"]*") (index="[^"]*") (defaultArrayLength="[^"]*")>', blk)
+    if not m:
+        raise Skip("scan 5's spectrum tag is not id, index, defaultArrayLength")
+    return t[:a0] + f"{m.group(1)}<spectrum {m.group(4)} {m.group(3)} {m.group(2)}>" + blk[m.end():] + t[a1:]
+
+def same_number_spelling(t):
+    t = param_value(t, 5, "MS:1000927", lambda v: v + ".000" if "." not in v else v + "000")
+    return param_value(t, 5, "MS:1000285", lambda v: f"{float(v):e}" if float(v) == float(f"{float(v):e}") else repr(float(v) / 10) + "e1")
+
+def same_value_whitespace(t):
+    return param_value(t, 5, "MS:1000927", lambda v: f" {v} ")
+
+def same_seconds(t):
+    t = param_value(t, 5, "MS:1000016", lambda v: repr(float(v) * 60))
+    a0, a1 = spectrum_block(t, 5)
+    blk = t[a0:a1]
+    old = 'name="scan start time" unitAccession="UO:0000031" unitName="minute"'
+    if old not in blk:
+        raise Skip("scan 5's start time is not in minutes")
+    return t[:a0] + blk.replace(old, 'name="scan start time" unitAccession="UO:0000010" unitName="second"') + t[a1:]
+
+def same_uncompressed(t):
+    return with_array(t, 5, "MS:1000514", lambda v: v, compressed=False)
+
+def same_float32(t):
+    return with_array(t, 5, "MS:1000515", lambda v: v, bits=32)
+
+def same_peak_order(t):
+    return with_array(with_array(t, 5, "MS:1000514", lambda v: v[::-1]), 5, "MS:1000515", lambda v: v[::-1])
+
+# Tolerance boundaries: just inside must stay minor, just outside must be reported.
+
+def mz_param_inside(t):
+    return param_value(t, 5, "MS:1000504", lambda v: repr(float(v) * (1 + 0.9e-6)))
+
+def mz_param_outside(t):
+    return param_value(t, 5, "MS:1000504", lambda v: repr(float(v) * (1 + 1.5e-6)))
+
+def mz_array_inside(t):
+    return with_array(t, 5, "MS:1000514", lambda v: scale_at(v, 3, 1 + 0.9e-6))
+
+def mz_array_outside(t):
+    return with_array(t, 5, "MS:1000514", lambda v: scale_at(v, 3, 1 + 1.5e-6))
+
+def intensity_inside(t):
+    return with_array(t, 5, "MS:1000515", lambda v: scale_at(v, 3, 1 + 5e-8))
+
+def intensity_outside(t):
+    return with_array(t, 5, "MS:1000515", lambda v: scale_at(v, 3, 1 + 1e-6))
+
+def rounding_inside(t):
+    return param_value(t, 5, "MS:1000016", lambda v: f"{float(v):.5f}")
+
+def rounding_outside(t):
+    return param_value(t, 5, "MS:1000016", lambda v: f"{float(v) + 2e-5:.5f}")
+
 def empty_spectra(t):
     s = t.index("<spectrum ")
     s = t.rindex("\n", 0, s) + 1
@@ -193,9 +311,27 @@ CASES = [
     ("swap_precursor_charge", swap_precursor_charge, "MS:1000041"),
     ("swap_precursor_energy", swap_precursor_energy, "MS:1000045"),
     ("reorder_precursors", reorder_precursors, None),
+    # Meaning-preserving edits.
+    ("same_param_order", same_param_order, None),
+    ("same_attribute_order", same_attribute_order, None),
+    ("same_number_spelling", same_number_spelling, None),
+    ("same_value_whitespace", same_value_whitespace, None),
+    ("same_seconds", same_seconds, None),
+    ("same_uncompressed", same_uncompressed, None),
+    ("same_float32", same_float32, "minor:precision"),
+    ("same_peak_order", same_peak_order, "minor:peak_order"),
+    # Each tolerance, just inside (minor) and just outside (reported).
+    ("mz_param_inside", mz_param_inside, "minor:ppm"),
+    ("mz_param_outside", mz_param_outside, "MS:1000504"),
+    ("mz_array_inside", mz_array_inside, "minor:ppm"),
+    ("mz_array_outside", mz_array_outside, "array:MS:1000514"),
+    ("intensity_inside", intensity_inside, "minor:narrow"),
+    ("intensity_outside", intensity_outside, "array:MS:1000515"),
+    ("rounding_inside", rounding_inside, "minor:rounding"),
+    ("rounding_outside", rounding_outside, "MS:1000016"),
     # mzValidate checks these (a unit the term does not allow, the index, the checksum); mzdiff
-    # must stay quiet about them, or file them as minor.
-    ("unit_only_b", unit_only_b, None),
+    # files the unit as minor and stays quiet about the rest.
+    ("unit_only_b", unit_only_b, "minor:unit"),
     ("bad_index_offset", bad_index_offset, None),
     ("bad_checksum", bad_checksum, None),
     ("index_attr", index_attr, None),
@@ -219,17 +355,20 @@ for name, edit, expect in CASES:
     open(out, "w", encoding="utf-8").write(mutated)
     run = subprocess.run([MZDIFF, "--tsv", REF, out], capture_output=True, text=True)
     rows = [r.split("\t") for r in run.stdout.splitlines()[1:]]
-    serious = {r[4] for r in rows if r[0] in ("critical", "major")}
     if expect != "indexListOffset":
-        serious.discard("indexListOffset")
+        rows = [r for r in rows if r[4] != "indexListOffset"]
+    serious = {r[4] for r in rows if r[0] in ("critical", "major")}
+    minor = {r[1] for r in rows if r[0] == "minor"}
     if expect == EXIT2:
         ok = run.returncode == 2
     elif expect is None:
-        ok = run.returncode in (0, 1) and not serious
+        ok = run.returncode in (0, 1) and not rows
+    elif expect.startswith("minor:"):
+        ok = run.returncode in (0, 1) and not serious and expect[len("minor:"):] in minor
     else:
         ok = expect in serious
     failed += not ok
-    got = f"exit {run.returncode}" if run.returncode == 2 else (", ".join(sorted(serious)) or "same")
+    got = f"exit {run.returncode}" if run.returncode == 2 else (", ".join(sorted(serious) + [f"minor:{k}" for k in sorted(minor)]) or "same")
     print(f"{name:24} {'ok    ' if ok else 'FAIL  '} expected {expect or 'same'}; got {got}")
 os.remove(out)
 sys.exit(1 if failed else 0)
