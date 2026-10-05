@@ -120,6 +120,9 @@ pub const Report = struct {
     record: usize = 0,
     /// Paths with a real difference in the current record (set by `diffFacts`).
     dirty: std.ArrayList([]const u8) = .empty,
+    // Scratch for `sortFacts`, reused across records.
+    runs: std.ArrayList(Run) = .empty,
+    reordered: std.ArrayList(Fact) = .empty,
     /// Sees every difference before it is filed, for `--list`.
     sink: ?Sink = null,
 
@@ -145,6 +148,8 @@ pub const Report = struct {
         }
         self.classes.deinit(self.allocator);
         self.dirty.deinit(self.allocator);
+        self.runs.deinit(self.allocator);
+        self.reordered.deinit(self.allocator);
     }
 
     /// Like `add`, and marks the path as holding a real difference in this record.
@@ -289,6 +294,46 @@ pub const NO_PARENT = std.math.maxInt(u32);
 /// Collects the facts of a node and its children. Binary arrays are left to `compareArrays`; the
 /// elements in `skip` (header lists) are left out with their children. With `elements`, each
 /// element visited is listed and each fact names its element.
+/// Strings that repeat across one side's records (element paths, keys, names, units), copied once
+/// and shared by every fact after, with each key's severity looked up once. One per reading thread,
+/// so it needs no lock; its strings live until `deinit`. Past `limit` bytes it takes no new strings
+/// and `get` returns null, so a file with endless distinct keys costs per-record copies, not
+/// unbounded memory.
+pub const Interner = struct {
+    arena: std.heap.ArenaAllocator,
+    strings: std.StringHashMapUnmanaged(?Severity) = .empty,
+    bytes: usize = 0,
+    limit: usize = 8 << 20,
+
+    pub fn init(allocator: std.mem.Allocator) Interner {
+        return .{ .arena = .init(allocator) };
+    }
+
+    pub fn deinit(self: *Interner) void {
+        self.arena.deinit();
+    }
+
+    /// Returns the shared copy of `text`, or null once the interner is full.
+    pub fn get(self: *Interner, text: []const u8) !?[]const u8 {
+        if (self.strings.getKey(text)) |found| return found;
+        // The map's own entries count too, roughly.
+        if (self.bytes + text.len + 32 > self.limit) return null;
+        const arena = self.arena.allocator();
+        const copy = try arena.dupe(u8, text);
+        try self.strings.put(arena, copy, null);
+        self.bytes += text.len + 32;
+        return copy;
+    }
+
+    fn severity(self: *Interner, rules: *Rules, key: []const u8) Severity {
+        const cached = self.strings.getPtr(key) orelse return rules.severity(key);
+        if (cached.*) |found| return found;
+        const found = rules.severity(key);
+        cached.* = found;
+        return found;
+    }
+};
+
 pub const Collector = struct {
     arena: std.mem.Allocator,
     rules: *Rules,
@@ -296,12 +341,31 @@ pub const Collector = struct {
     elements: ?*std.ArrayList(Element) = null,
     groups: []const cv.Group,
     skip: []const model.Kind = &.{},
+    /// When set, every fact's path, key, name, and unit is a stable copy (shared or in `arena`);
+    /// only its text still borrows from the record.
+    interner: ?*Interner = null,
+
+    // A stable copy of a repeating string: shared when the interner has room, else in the arena.
+    // Without an interner the string is returned as it is, borrowed.
+    fn stable(self: *const Collector, text: []const u8) ![]const u8 {
+        const interner = self.interner orelse return text;
+        return (try interner.get(text)) orelse try self.arena.dupe(u8, text);
+    }
+
+    fn severityOf(self: *const Collector, key: []const u8) Severity {
+        const interner = self.interner orelse return self.rules.severity(key);
+        return interner.severity(self.rules, key);
+    }
 
     pub fn add(self: *const Collector, node: model.Node, prefix: []const u8, parent: u32) !void {
         for (self.skip) |kind| if (node.kind == kind) return;
         if (node.kind == .binary_data_array_list or node.kind == .binary) return;
+        var path_buffer: [512]u8 = undefined;
         const path = if (prefix.len == 0)
             node.kind.xmlName()
+        else if (self.interner != null)
+            try self.stable(std.fmt.bufPrint(&path_buffer, "{s}/{s}", .{ prefix, node.kind.xmlName() }) catch
+                return error.ElementPathTooLong)
         else
             try std.fmt.allocPrint(self.arena, "{s}/{s}", .{ prefix, node.kind.xmlName() });
         var element: u32 = 0;
@@ -314,34 +378,39 @@ pub const Collector = struct {
             if (attribute.namespace_uri != null) continue;
             var key_buffer: [128]u8 = undefined;
             const probe = std.fmt.bufPrint(&key_buffer, "@{s}", .{attribute.name}) catch return error.AttributeNameTooLong;
-            if (self.rules.severity(probe) == .ignored) continue;
-            try self.facts.append(self.arena, makeFact(path, try self.arena.dupe(u8, probe), "", attribute.value, "", element));
+            const key = if (self.interner != null) try self.stable(probe) else try self.arena.dupe(u8, probe);
+            if (self.severityOf(key) == .ignored) continue;
+            try self.facts.append(self.arena, makeFact(path, key, "", attribute.value, "", element));
         }
 
         var params: cv.EffectiveIterator = .{ .entries = node.params, .groups = self.groups };
         while (try params.next()) |entry| switch (entry) {
             .cv => |param| {
-                const key = if (param.accession) |accession| accession.raw else param.name orelse continue;
-                if (self.rules.severity(key) == .ignored) continue;
+                const key = try self.stable(if (param.accession) |accession| accession.raw else param.name orelse continue);
+                if (self.severityOf(key) == .ignored) continue;
                 try self.facts.append(self.arena, makeFact(
                     path,
                     key,
-                    param.name orelse "",
+                    try self.stable(param.name orelse ""),
                     param.value orelse "",
-                    unitOf(param.unit),
+                    try self.stable(unitOf(param.unit)),
                     element,
                 ));
             },
             .user => |param| {
                 const name = param.name orelse continue;
-                const key = try std.fmt.allocPrint(self.arena, "user:{s}", .{name});
-                if (self.rules.severity(key) == .ignored) continue;
+                var key_buffer: [256]u8 = undefined;
+                const key = if (self.interner != null)
+                    try self.stable(std.fmt.bufPrint(&key_buffer, "user:{s}", .{name}) catch return error.ParameterNameTooLong)
+                else
+                    try std.fmt.allocPrint(self.arena, "user:{s}", .{name});
+                if (self.severityOf(key) == .ignored) continue;
                 try self.facts.append(self.arena, makeFact(
                     path,
                     key,
-                    name,
+                    try self.stable(name),
                     param.value orelse "",
-                    unitOf(param.unit),
+                    try self.stable(unitOf(param.unit)),
                     element,
                 ));
             },
@@ -364,17 +433,6 @@ pub fn collect(
 ) !void {
     const collector: Collector = .{ .arena = arena, .rules = rules, .facts = facts, .groups = groups, .skip = skip };
     try collector.add(node, prefix, NO_PARENT);
-}
-
-/// A copy of `fact` whose text lives in `arena`.
-pub fn ownFact(arena: std.mem.Allocator, fact: Fact) !Fact {
-    var copy = fact;
-    copy.path = try arena.dupe(u8, fact.path);
-    copy.key = try arena.dupe(u8, fact.key);
-    copy.name = try arena.dupe(u8, fact.name);
-    copy.text = try arena.dupe(u8, fact.text);
-    copy.unit = try arena.dupe(u8, fact.unit);
-    return copy;
 }
 
 /// A fact with its value parsed; times in seconds become minutes.
@@ -404,8 +462,8 @@ fn unitOf(unit: anytype) []const u8 {
 /// The paths of real differences (not tolerance-level ones) are kept in `report.dirty`.
 pub fn diffFacts(report: *Report, id: []const u8, a: []Fact, b: []Fact) !void {
     report.dirty.clearRetainingCapacity();
-    std.mem.sort(Fact, a, {}, factLess);
-    std.mem.sort(Fact, b, {}, factLess);
+    try sortFacts(report, a);
+    try sortFacts(report, b);
     var i: usize = 0;
     var j: usize = 0;
     while (i < a.len or j < b.len) {
@@ -432,7 +490,7 @@ pub fn diffFacts(report: *Report, id: []const u8, a: []Fact, b: []Fact) !void {
 /// Sorts and drops exact repeats (same path, key, value, unit): header facts compare as a set,
 /// so a model named once per instrument configuration is not a count difference.
 pub fn dedupe(facts: []Fact) []Fact {
-    std.mem.sort(Fact, facts, {}, factLess);
+    std.mem.sortUnstable(Fact, facts, {}, factLess);
     var kept: usize = 0;
     for (facts) |fact| {
         if (kept > 0) {
@@ -445,19 +503,74 @@ pub fn dedupe(facts: []Fact) []Fact {
     return facts[0..kept];
 }
 
+const Run = struct { path: []const u8, start: usize, end: usize };
+
+// Sorts facts by `factLess`, using the order they arrive in: a record's facts come grouped by
+// element, so sorting the runs of one path (a dozen or so) and then each path's facts by key costs
+// far fewer comparisons than sorting them all at once. The result is the same order.
+fn sortFacts(report: *Report, facts: []Fact) !void {
+    const allocator = report.allocator;
+    report.runs.clearRetainingCapacity();
+    var start: usize = 0;
+    while (start < facts.len) {
+        var end = start + 1;
+        while (end < facts.len and sameText(facts[end].path, facts[start].path)) end += 1;
+        try report.runs.append(allocator, .{ .path = facts[start].path, .start = start, .end = end });
+        start = end;
+    }
+    const runs = report.runs.items;
+    if (runs.len > 1) {
+        std.mem.sortUnstable(Run, runs, {}, struct {
+            fn less(_: void, x: Run, y: Run) bool {
+                return orderText(x.path, y.path) == .lt;
+            }
+        }.less);
+        report.reordered.clearRetainingCapacity();
+        try report.reordered.ensureTotalCapacity(allocator, facts.len);
+        for (runs) |run| report.reordered.appendSliceAssumeCapacity(facts[run.start..run.end]);
+        @memcpy(facts, report.reordered.items);
+    }
+    // Each path's facts, now adjacent (repeated elements included), by key and value.
+    start = 0;
+    while (start < facts.len) {
+        var end = start + 1;
+        while (end < facts.len and sameText(facts[end].path, facts[start].path)) end += 1;
+        if (end - start > 1) std.mem.sortUnstable(Fact, facts[start..end], {}, factLess);
+        start = end;
+    }
+}
+
+// A total order: by path, key, value (numbers first, NaN after other numbers), text, then unit.
 fn factLess(_: void, x: Fact, y: Fact) bool {
-    var order = std.mem.order(u8, x.path, y.path);
+    var order = orderText(x.path, y.path);
     if (order != .eq) return order == .lt;
-    order = std.mem.order(u8, x.key, y.key);
+    order = orderText(x.key, y.key);
     if (order != .eq) return order == .lt;
-    if (x.number != null and y.number != null) return x.number.? < y.number.?;
-    if (x.number != null) return true;
-    if (y.number != null) return false;
-    return std.mem.order(u8, x.text, y.text) == .lt;
+    if (x.number != null and y.number != null) {
+        const p = x.number.?;
+        const q = y.number.?;
+        if (std.math.isNan(p) != std.math.isNan(q)) return std.math.isNan(q);
+        if (p != q and !std.math.isNan(p)) return p < q;
+    } else if (x.number != null or y.number != null) {
+        return x.number != null;
+    }
+    order = std.mem.order(u8, x.text, y.text);
+    if (order != .eq) return order == .lt;
+    return std.mem.order(u8, x.unit, y.unit) == .lt;
+}
+
+// Interned strings of one side are the same pointer, which settles most comparisons at once.
+fn orderText(a: []const u8, b: []const u8) std.math.Order {
+    if (a.ptr == b.ptr and a.len == b.len) return .eq;
+    return std.mem.order(u8, a, b);
+}
+
+fn sameText(a: []const u8, b: []const u8) bool {
+    return (a.ptr == b.ptr and a.len == b.len) or std.mem.eql(u8, a, b);
 }
 
 fn sameGroup(x: Fact, y: Fact) bool {
-    return std.mem.eql(u8, x.path, y.path) and std.mem.eql(u8, x.key, y.key);
+    return sameText(x.path, y.path) and sameText(x.key, y.key);
 }
 
 fn groupLess(x: Fact, y: Fact) bool {
@@ -1147,6 +1260,37 @@ test "[unit] - [arrays]: peaks in the same order are not reordered when an inten
         .{ .key = "array:MS:1000515", .values = .{ .float64 = &intensity_reversed } },
     };
     try std.testing.expect(try samePeaks(arena.allocator(), &a, &c));
+}
+
+test "[property] - [facts]: sorting by path runs gives the same order as one full sort" {
+    const allocator = std.testing.allocator;
+    var rules = Rules.init(allocator);
+    defer rules.deinit();
+    var report = Report.init(allocator, &rules, 3);
+    defer report.deinit();
+    const ion = "spectrum/precursor/selectedIon";
+    // Two repeated elements, a path that returns after another, and ties broken by text and unit.
+    const facts = [_]Fact{
+        makeFact("spectrum", "MS:1000511", "", "2", "", 0),
+        makeFact(ion, "MS:1000744", "", "641.29", "", 1),
+        makeFact(ion, "MS:1000041", "", "2", "", 1),
+        makeFact("spectrum/scan", "MS:1000016", "", "1.5", MINUTE, 2),
+        makeFact(ion, "MS:1000744", "", "427.53", "", 3),
+        makeFact(ion, "MS:1000041", "", "3", "", 3),
+        makeFact("spectrum", "MS:1000285", "", "nan", "", 0),
+        makeFact("spectrum", "MS:1000285", "", "17442.45", "", 0),
+        makeFact("spectrum", "user:note", "", "b", "", 0),
+        makeFact("spectrum", "user:note", "", "a", "", 0),
+    };
+    var by_runs = facts;
+    var full = facts;
+    try sortFacts(&report, &by_runs);
+    std.mem.sortUnstable(Fact, &full, {}, factLess);
+    for (by_runs, full) |x, y| {
+        try std.testing.expectEqualStrings(y.path, x.path);
+        try std.testing.expectEqualStrings(y.key, x.key);
+        try std.testing.expectEqualStrings(y.text, x.text);
+    }
 }
 
 test "[unit] - [facts]: facts compare by value whatever the spelling and order" {

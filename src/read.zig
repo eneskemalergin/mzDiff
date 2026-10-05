@@ -47,6 +47,8 @@ pub const Side = struct {
     // What is wrong with the indexed wrapper's tail, or null.
     trailer: ?[]const u8 = null,
     configuration_arena: std.heap.ArenaAllocator = undefined,
+    // The repeating strings of this side's facts, shared by its items; outlives every item.
+    interner: compare.Interner = undefined,
 
     pub fn open(self: *Side, allocator: std.mem.Allocator, io: std.Io, path: []const u8, rules: *const Rules) !void {
         self.path = path;
@@ -67,6 +69,8 @@ pub const Side = struct {
         errdefer self.rules.deinit();
         self.configuration_arena = .init(allocator);
         errdefer self.configuration_arena.deinit();
+        self.interner = .init(allocator);
+        errdefer self.interner.deinit();
         self.configurations = .empty;
         try self.readConfigurations();
         self.queue = .init(&self.slots);
@@ -115,6 +119,7 @@ pub const Side = struct {
 
     pub fn close(self: *Side, io: std.Io) void {
         self.configuration_arena.deinit();
+        self.interner.deinit();
         self.freeSpares();
         self.rules.deinit();
         self.decoded.deinit();
@@ -196,17 +201,18 @@ fn makeItem(side: *Side, record: model.Record) !Item {
         .facts = &facts,
         .elements = &elements,
         .groups = header.groups,
+        .interner = &side.interner,
     };
     try collector.add(record.node, "", compare.NO_PARENT);
-    // Facts borrow from the reader's record; copy them before it moves on.
+    // Paths, keys, names, and units are stable already; values borrow from the reader's record, so
+    // copy them before it moves on.
     var type_key: []const u8 = "";
     for (facts.items) |*fact| {
-        fact.* = try compare.ownFact(arena, fact.*);
+        fact.text = try arena.dupe(u8, fact.text);
         const on_chromatogram = record.node.kind == .chromatogram and std.mem.eql(u8, fact.path, "chromatogram");
         if (on_chromatogram and type_key.len == 0 and rules.isA(fact.key, "MS:1000626"))
             type_key = fact.key;
     }
-    for (elements.items) |*element| element.path = try arena.dupe(u8, element.path);
     // Each scan's instrument configuration, named or the run's default, as component facts. The
     // configuration facts live as long as the side; only the element they belong to is new.
     for (elements.items, 0..) |element, position| {
