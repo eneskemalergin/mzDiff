@@ -23,6 +23,8 @@ const model = mzml.model;
 const compare = @import("compare.zig");
 const html = @import("html.zig");
 const output = @import("output.zig");
+const pair = @import("pair.zig");
+const read = @import("read.zig");
 const rules_mod = @import("rules.zig");
 
 const Fact = compare.Fact;
@@ -301,284 +303,6 @@ fn modeOf(arg: []const u8) ?output.Mode {
     return null;
 }
 
-// One input: its file, reader, and header. The header is read on the main thread; records are
-// read by `produce` on the side's own thread. Never moved after `open`: the reader points into
-// `input`.
-const Side = struct {
-    path: []const u8,
-    file: std.Io.File,
-    buffer: [256 * 1024]u8,
-    input: std.Io.File.Reader,
-    reader: mzml.StreamReader,
-    decoded: mzml.DecodedArrays,
-    header: *const model.Header,
-    software: []const u8 = "",
-    rules: Rules,
-    slots: [QUEUE_DEPTH]Item = undefined,
-    queue: std.Io.Queue(Item) = undefined,
-    // Arenas handed back by the comparing thread for reuse, so memory is allocated and freed on
-    // the reading thread instead of piling up in another thread's allocator cache.
-    spare_slots: [QUEUE_DEPTH + 4]*std.heap.ArenaAllocator = undefined,
-    spare: std.Io.Queue(*std.heap.ArenaAllocator) = undefined,
-    allocator: std.mem.Allocator = undefined,
-    io: std.Io = undefined,
-    failure: ?anyerror = null,
-    spectra: usize = 0,
-    chromatograms: usize = 0,
-    // Each instrument configuration's component facts by id, for the scans that refer to it.
-    configurations: std.StringHashMapUnmanaged([]const Fact) = .empty,
-    default_configuration: ?[]const u8 = null,
-    // What is wrong with the indexed wrapper's tail, or null.
-    trailer: ?[]const u8 = null,
-    configuration_arena: std.heap.ArenaAllocator = undefined,
-
-    fn open(self: *Side, allocator: std.mem.Allocator, io: std.Io, path: []const u8, rules: *const Rules) !void {
-        self.path = path;
-        self.failure = null;
-        self.spectra = 0;
-        self.chromatograms = 0;
-        self.file = try std.Io.Dir.cwd().openFile(io, path, .{});
-        errdefer self.file.close(io);
-        self.input = self.file.reader(io, &self.buffer);
-        self.reader = try mzml.StreamReader.init(allocator, &self.input.interface, .{});
-        errdefer self.reader.deinit();
-        self.decoded = mzml.DecodedArrays.init(allocator, .{});
-        errdefer self.decoded.deinit();
-        self.header = self.reader.readHeader() catch |err| return self.explain(err);
-        self.software = softwareName(self.header.document);
-        self.trailer = if (self.header.indexed) try checkTrailer(self.file, io) else null;
-        self.rules = try rules.clone();
-        errdefer self.rules.deinit();
-        self.configuration_arena = .init(allocator);
-        errdefer self.configuration_arena.deinit();
-        self.configurations = .empty;
-        try self.readConfigurations();
-        self.queue = .init(&self.slots);
-        self.spare = .init(&self.spare_slots);
-        self.allocator = allocator;
-        self.io = io;
-    }
-
-    // An arena for the next record: a recycled one when available.
-    fn arena(self: *Side) !*std.heap.ArenaAllocator {
-        var one: [1]*std.heap.ArenaAllocator = undefined;
-        if ((self.spare.get(self.io, &one, 0) catch 0) == 1) return one[0];
-        const fresh = try self.allocator.create(std.heap.ArenaAllocator);
-        fresh.* = .init(self.allocator);
-        return fresh;
-    }
-
-    // Takes back a record's arena; frees it when the spare queue is full or closed.
-    fn recycle(self: *Side, arena_state: *std.heap.ArenaAllocator) void {
-        _ = arena_state.reset(.retain_capacity);
-        const handed = self.spare.put(self.io, &.{arena_state}, 0) catch 0;
-        if (handed == 0) destroyArena(self.allocator, arena_state);
-    }
-
-    fn freeSpares(self: *Side) void {
-        self.spare.close(self.io);
-        var one: [1]*std.heap.ArenaAllocator = undefined;
-        while ((self.spare.get(self.io, &one, 1) catch 0) == 1) destroyArena(self.allocator, one[0]);
-    }
-
-    // Collects each instrument configuration's components (source, analyzer, detector) as facts
-    // under the scan path, so a scan that names another configuration differs where it matters.
-    fn readConfigurations(self: *Side) !void {
-        const store = self.configuration_arena.allocator();
-        self.default_configuration = self.header.run.attribute("defaultInstrumentConfigurationRef");
-        const list = self.header.document.child(.instrument_configuration_list) orelse return;
-        for (list.children) |configuration| {
-            if (configuration.kind != .instrument_configuration) continue;
-            const id = configuration.attribute("id") orelse continue;
-            var facts: std.ArrayList(Fact) = .empty;
-            const components = configuration.child(.component_list);
-            if (components) |node| try compare.collect(store, &self.rules, &facts, node, CONFIGURATION_PATH, self.header.groups, &.{});
-            try self.configurations.put(store, id, facts.items);
-        }
-    }
-
-    fn close(self: *Side, io: std.Io) void {
-        self.configuration_arena.deinit();
-        self.freeSpares();
-        self.rules.deinit();
-        self.decoded.deinit();
-        self.reader.deinit();
-        self.file.close(io);
-    }
-
-    fn explain(self: *Side, err: anyerror) anyerror {
-        if (self.reader.diagnostic()) |diagnostic| std.debug.print("mzdiff: {s}: {f}\n", .{ self.path, diagnostic });
-        return err;
-    }
-};
-
-// Records in flight per side; bounds memory to this many decoded records each.
-const QUEUE_DEPTH = 16;
-
-// One record, read and reduced to facts and arrays on its side's thread, owning its memory.
-const Item = struct {
-    kind: model.Kind,
-    id: []const u8,
-    scan: ?u64,
-    // The chromatogram type term (TIC, base peak, SRM, ...), or "" without one.
-    type: []const u8,
-    facts: []Fact,
-    elements: []const compare.Element,
-    arrays: []const compare.Role,
-    arena: *std.heap.ArenaAllocator,
-    owner: *Side,
-    used: bool = false,
-    // Which spectrum of its file this is (1 for the first); 0 for a chromatogram.
-    position: usize = 0,
-
-    fn free(self: *const Item, allocator: std.mem.Allocator) void {
-        _ = allocator;
-        self.owner.recycle(self.arena);
-    }
-};
-
-fn destroyArena(allocator: std.mem.Allocator, arena_state: *std.heap.ArenaAllocator) void {
-    arena_state.deinit();
-    allocator.destroy(arena_state);
-}
-
-// Reads the side's records into owned items and queues them; closes the queue at the end. A read
-// failure is kept in `side.failure`.
-fn produce(allocator: std.mem.Allocator, io: std.Io, side: *Side) void {
-    defer side.queue.close(io);
-    while (true) {
-        const record = side.reader.nextDecodedRecord(&side.decoded) catch |err| {
-            side.failure = side.explain(err);
-            return;
-        } orelse return;
-        const item = makeItem(side, record) catch |err| {
-            side.failure = err;
-            return;
-        };
-        side.queue.putOne(io, item) catch {
-            item.free(allocator);
-            return;
-        };
-    }
-}
-
-const SCAN_PATH = "spectrum/scanList/scan";
-const CONFIGURATION_PATH = SCAN_PATH ++ "/instrumentConfiguration";
-
-fn makeItem(side: *Side, record: model.Record) !Item {
-    const rules = &side.rules;
-    const header = side.header;
-    const arena_state = try side.arena();
-    errdefer destroyArena(side.allocator, arena_state);
-    const arena = arena_state.allocator();
-    var facts: std.ArrayList(Fact) = .empty;
-    var elements: std.ArrayList(compare.Element) = .empty;
-    const collector: compare.Collector = .{
-        .arena = arena,
-        .rules = rules,
-        .facts = &facts,
-        .elements = &elements,
-        .groups = header.groups,
-    };
-    try collector.add(record.node, "", compare.NO_PARENT);
-    // Facts borrow from the reader's record; copy them before it moves on.
-    var type_key: []const u8 = "";
-    for (facts.items) |*fact| {
-        fact.* = try compare.ownFact(arena, fact.*);
-        const on_chromatogram = record.node.kind == .chromatogram and std.mem.eql(u8, fact.path, "chromatogram");
-        if (on_chromatogram and type_key.len == 0 and rules.isA(fact.key, "MS:1000626"))
-            type_key = fact.key;
-    }
-    for (elements.items) |*element| element.path = try arena.dupe(u8, element.path);
-    // Each scan's instrument configuration, named or the run's default, as component facts. The
-    // configuration facts live as long as the side; only the element they belong to is new.
-    for (elements.items, 0..) |element, position| {
-        if (!std.mem.eql(u8, element.path, SCAN_PATH)) continue;
-        const scan = nthScan(record.node, scanOrdinal(elements.items, position)) orelse continue;
-        const ref = scan.attribute("instrumentConfigurationRef") orelse side.default_configuration orelse continue;
-        const components = side.configurations.get(ref) orelse {
-            try facts.append(arena, compare.makeFact(SCAN_PATH, "instrumentConfiguration", "", ref, "", @intCast(position)));
-            continue;
-        };
-        for (components) |component| {
-            var fact = component;
-            fact.element = @intCast(position);
-            try facts.append(arena, fact);
-        }
-    }
-    const id = try arena.dupe(u8, record.id);
-    return .{
-        .kind = record.node.kind,
-        .id = id,
-        .scan = scanNumber(id),
-        .type = type_key,
-        .facts = facts.items,
-        .elements = elements.items,
-        .arrays = try compare.roles(arena, record, header.groups, &side.decoded, true),
-        .arena = arena_state,
-        .owner = side,
-    };
-}
-
-// Which scan (0 for the first) the element at `position` is among the record's scans.
-fn scanOrdinal(elements: []const compare.Element, position: usize) usize {
-    var count: usize = 0;
-    for (elements[0..position]) |element| count += @intFromBool(std.mem.eql(u8, element.path, SCAN_PATH));
-    return count;
-}
-
-fn nthScan(spectrum: model.Node, ordinal: usize) ?model.Node {
-    const list = spectrum.child(.scan_list) orelse return null;
-    var count: usize = 0;
-    for (list.children) |child| if (child.kind == .scan) {
-        if (count == ordinal) return child;
-        count += 1;
-    };
-    return null;
-}
-
-// The reader stops at </mzML>, so the indexed wrapper's tail is checked here: it must end with
-// indexListOffset, fileChecksum, and </indexedmzML>, and the offset must point at <indexList
-// (or the whitespace before it). Returns what is wrong, or null. The offsets inside the index
-// and the checksum are left to mzValidate.
-fn checkTrailer(file: std.Io.File, io: std.Io) !?[]const u8 {
-    const size = try file.length(io);
-    var tail_buffer: [4096]u8 = undefined;
-    const start = size -| tail_buffer.len;
-    const tail = tail_buffer[0..try file.readPositionalAll(io, tail_buffer[0..@intCast(size - start)], start)];
-    const trimmed = std.mem.trimEnd(u8, tail, " \t\r\n");
-    const offset_text = between(trimmed, "<indexListOffset>", "</indexListOffset>");
-    const checksum = between(trimmed, "<fileChecksum>", "</fileChecksum>");
-    if (!std.mem.endsWith(u8, trimmed, "</indexedmzML>") or offset_text == null or checksum == null)
-        return "no index trailer";
-    const offset = std.fmt.parseInt(u64, std.mem.trim(u8, offset_text.?, " \t\r\n"), 10) catch return "offset is not a number";
-    // TRFP's offsets point at the indentation before the element, which readers accept.
-    var head_buffer: [256]u8 = undefined;
-    const got = if (offset < size) try file.readPositionalAll(io, &head_buffer, offset) else 0;
-    const head = std.mem.trimStart(u8, head_buffer[0..got], " \t\r\n");
-    if (!std.mem.startsWith(u8, head, "<indexList")) return "offset misses <indexList>";
-    return null;
-}
-
-fn between(text: []const u8, open: []const u8, close: []const u8) ?[]const u8 {
-    const at = std.mem.lastIndexOf(u8, text, open) orelse return null;
-    const end = std.mem.indexOfPos(u8, text, at + open.len, close) orelse return null;
-    return text[at + open.len .. end];
-}
-
-fn softwareName(document: model.Node) []const u8 {
-    const list = document.child(.software_list) orelse return "";
-    if (list.children.len == 0) return "";
-    return list.children[0].attribute("id") orelse "";
-}
-
-fn scanNumber(id: []const u8) ?u64 {
-    const at = std.mem.indexOf(u8, id, "scan=") orelse return null;
-    var end = at + 5;
-    while (end < id.len and std.ascii.isDigit(id[end])) end += 1;
-    return std.fmt.parseInt(u64, id[at + 5 .. end], 10) catch null;
-}
-
 const HEADER_SKIP = [_]model.Kind{
     .cv_list,
     .software_list,
@@ -590,149 +314,6 @@ const HEADER_SKIP = [_]model.Kind{
     .index_list,
 };
 
-// The consumer's view of one side: the item at hand, pulled from the side's queue.
-const Stream = struct {
-    side: *Side,
-    io: std.Io,
-    current: ?Item = null,
-    position: usize = 0,
-
-    fn advance(self: *Stream) void {
-        self.current = self.side.queue.getOne(self.io) catch null;
-        if (self.current) |*item| switch (item.kind) {
-            .spectrum => {
-                self.side.spectra += 1;
-                self.position += 1;
-                item.position = self.position;
-            },
-            .chromatogram => self.side.chromatograms += 1,
-            else => {},
-        };
-    }
-
-    // Hands over the current item; the caller frees it.
-    fn take(self: *Stream) Item {
-        const item = self.current.?;
-        self.current = null;
-        return item;
-    }
-
-    fn isSpectrum(self: *const Stream) bool {
-        return if (self.current) |item| item.kind == .spectrum else false;
-    }
-};
-
-// How spectra pair: by the whole native id when both files use the same id fields (any vendor's
-// format), by the scan number when the formats differ but both have one, else by position.
-const KeyKind = enum { id, scan, position };
-
-fn keyKind(a: ?Item, b: ?Item) KeyKind {
-    const x = a orelse return .position;
-    const y = b orelse return .position;
-    if (x.kind != .spectrum or y.kind != .spectrum) return .position;
-    if (sameIdFields(x.id, y.id)) return .id;
-    if (x.scan != null and y.scan != null) return .scan;
-    return .position;
-}
-
-// Whether two native ids have the same field names in the same order: "controllerType=0
-// controllerNumber=1 scan=5" and "controllerType=0 controllerNumber=1 scan=9" do.
-fn sameIdFields(a: []const u8, b: []const u8) bool {
-    var fields_a = std.mem.tokenizeScalar(u8, a, ' ');
-    var fields_b = std.mem.tokenizeScalar(u8, b, ' ');
-    while (true) {
-        const x = fields_a.next();
-        const y = fields_b.next();
-        if (x == null or y == null) return x == null and y == null;
-        const name_x = x.?[0 .. std.mem.indexOfScalar(u8, x.?, '=') orelse return false];
-        const name_y = y.?[0 .. std.mem.indexOfScalar(u8, y.?, '=') orelse return false];
-        if (!std.mem.eql(u8, name_x, name_y)) return false;
-    }
-}
-
-// The pairing key of a spectrum, in its item's arena. Without a scan number when pairing by scan,
-// the whole id stands in, so the spectrum pairs only with one of the same id.
-fn pairingKey(item: *const Item, kind: KeyKind) ![]const u8 {
-    const arena = item.arena.allocator();
-    return switch (kind) {
-        .id => item.id,
-        .scan => if (item.scan) |scan|
-            try std.fmt.allocPrint(arena, "scan={d}", .{scan})
-        else
-            try std.fmt.allocPrint(arena, "id={s}", .{item.id}),
-        .position => try std.fmt.allocPrint(arena, "{d}", .{item.position}),
-    };
-}
-
-// Spectra of one side waiting for a partner with the same key, oldest first. Files in step keep
-// one waiting; `WINDOW` bounds the rest.
-const Pending = struct {
-    const Waiting = struct { item: Item, seq: u64 };
-    const Entry = struct { key: []u8, seq: u64 };
-
-    waiting: std.StringHashMapUnmanaged(Waiting) = .empty,
-    // Arrival order; entries whose spectrum was paired since are dropped as they reach the head.
-    queue: std.ArrayList(Entry) = .empty,
-    head: usize = 0,
-
-    fn contains(self: *const Pending, key: []const u8) bool {
-        return self.waiting.contains(key);
-    }
-
-    fn count(self: *const Pending) usize {
-        return self.waiting.count();
-    }
-
-    fn put(self: *Pending, allocator: std.mem.Allocator, key: []const u8, item: Item, seq: u64) !void {
-        const owned = try allocator.dupe(u8, key);
-        errdefer allocator.free(owned);
-        try self.queue.append(allocator, .{ .key = owned, .seq = seq });
-        errdefer self.queue.items.len -= 1;
-        try self.waiting.put(allocator, owned, .{ .item = item, .seq = seq });
-    }
-
-    fn take(self: *Pending, allocator: std.mem.Allocator, key: []const u8) ?Item {
-        const found = self.waiting.fetchRemove(key) orelse return null;
-        self.trim(allocator);
-        return found.value.item;
-    }
-
-    fn oldest(self: *Pending, allocator: std.mem.Allocator) ?Item {
-        self.trim(allocator);
-        if (self.head == self.queue.items.len) return null;
-        const entry = self.queue.items[self.head];
-        const found = self.waiting.fetchRemove(entry.key).?;
-        self.head += 1;
-        allocator.free(entry.key);
-        self.trim(allocator);
-        return found.value.item;
-    }
-
-    fn trim(self: *Pending, allocator: std.mem.Allocator) void {
-        while (self.head < self.queue.items.len) {
-            const entry = self.queue.items[self.head];
-            if (self.waiting.get(entry.key)) |live| if (live.seq == entry.seq) break;
-            allocator.free(entry.key);
-            self.head += 1;
-        }
-        if (self.head == self.queue.items.len) {
-            self.queue.clearRetainingCapacity();
-            self.head = 0;
-        }
-    }
-
-    fn deinit(self: *Pending, allocator: std.mem.Allocator) void {
-        var it = self.waiting.valueIterator();
-        while (it.next()) |live| live.item.free(allocator);
-        for (self.queue.items[self.head..]) |entry| allocator.free(entry.key);
-        self.waiting.deinit(allocator);
-        self.queue.deinit(allocator);
-    }
-};
-
-// Spectra waiting for a partner beyond this many on one side are reported missing or extra.
-const WINDOW = 1024;
-
 fn run(
     allocator: std.mem.Allocator,
     io: std.Io,
@@ -742,7 +323,7 @@ fn run(
     style: output.Style,
     interactive: bool,
 ) !output.Status {
-    const sides = try allocator.create([2]Side);
+    const sides = try allocator.create([2]read.Side);
     defer allocator.destroy(sides);
     const side_a = &sides[0];
     const side_b = &sides[1];
@@ -805,130 +386,28 @@ fn run(
 
     const started = std.Io.Timestamp.now(io, .awake);
     // Each side is read, decoded, and reduced on its own thread; this thread pairs and compares.
-    var future_a = try io.concurrent(produce, .{ allocator, io, side_a });
-    var future_b = io.concurrent(produce, .{ allocator, io, side_b }) catch |err| {
+    var future_a = try io.concurrent(read.produce, .{ allocator, io, side_a });
+    var future_b = io.concurrent(read.produce, .{ allocator, io, side_b }) catch |err| {
         side_a.queue.close(io);
-        drain(allocator, io, side_a);
+        read.drain(allocator, io, side_a);
         future_a.await(io);
         return err;
     };
-    var a: Stream = .{ .side = side_a, .io = io };
-    var b: Stream = .{ .side = side_b, .io = io };
-    var kept: std.ArrayList(Item) = .empty;
-    var kept_b: std.ArrayList(Item) = .empty;
-    var scratch_state = std.heap.ArenaAllocator.init(allocator);
-    defer scratch_state.deinit();
-    const scratch = scratch_state.allocator();
-    var pending_a: Pending = .{};
-    defer pending_a.deinit(allocator);
-    var pending_b: Pending = .{};
-    defer pending_b.deinit(allocator);
-    var paired: usize = 0;
-    var paired_chromatograms: usize = 0;
-    var stopped_early = false;
+    var a: read.Stream = .{ .side = side_a, .io = io };
+    var b: read.Stream = .{ .side = side_b, .io = io };
 
-    const consumed: anyerror!void = consume: {
-        a.advance();
-        b.advance();
-        const kind = keyKind(a.current, b.current);
-        var seq: u64 = 0;
-        var last: ?[2]usize = null;
-        while (a.isSpectrum() or b.isSpectrum()) {
-            if (options.max_spectra) |limit| if (paired >= limit) {
-                stopped_early = true;
-                break;
-            };
-            inline for (.{ .{ &a, &pending_a, &pending_b, true }, .{ &b, &pending_b, &pending_a, false } }) |entry| {
-                const stream = entry[0];
-                if (stream.isSpectrum()) {
-                    const item = stream.take();
-                    stream.advance();
-                    seq += 1;
-                    const in_a = entry[3];
-                    const key = pairingKey(&item, kind) catch |err| {
-                        item.free(allocator);
-                        break :consume err;
-                    };
-                    if (entry[2].take(allocator, key)) |partner| {
-                        const x = if (in_a) item else partner;
-                        const y = if (in_a) partner else item;
-                        defer x.free(allocator);
-                        defer y.free(allocator);
-                        _ = scratch_state.reset(.retain_capacity);
-                        report.record += 1;
-                        comparePair(&report, scratch, kind, x, y, &last) catch |err| break :consume err;
-                        paired += 1;
-                    } else if (entry[1].contains(key)) {
-                        // Its key repeats on its own side: it can pair only once.
-                        defer item.free(allocator);
-                        reportUnpaired(&report, item, in_a) catch |err| break :consume err;
-                    } else {
-                        entry[1].put(allocator, key, item, seq) catch |err| {
-                            item.free(allocator);
-                            break :consume err;
-                        };
-                        while (entry[1].count() > WINDOW) {
-                            const old = entry[1].oldest(allocator).?;
-                            defer old.free(allocator);
-                            reportUnpaired(&report, old, in_a) catch |err| break :consume err;
-                        }
-                    }
-                }
-            }
-        }
-        if (stopped_early) break :consume {};
-        // Spectra that never found a partner, each side in its file order.
-        inline for (.{ .{ &pending_a, true }, .{ &pending_b, false } }) |entry| {
-            while (entry[0].oldest(allocator)) |item| {
-                defer item.free(allocator);
-                reportUnpaired(&report, item, entry[1]) catch |err| break :consume err;
-            }
-        }
-        // What is left: unpaired spectra, then chromatograms, which are few and paired by type.
-        inline for (.{ .{ &a, &kept, Kind.record_missing }, .{ &b, &kept_b, Kind.record_extra } }) |entry| {
-            const stream = entry[0];
-            while (stream.current != null) {
-                const item = stream.take();
-                if (item.kind == .chromatogram) {
-                    entry[1].append(allocator, item) catch |err| {
-                        item.free(allocator);
-                        break :consume err;
-                    };
-                } else {
-                    defer item.free(allocator);
-                    report.record += 1;
-                    const in_a = entry[2] == .record_missing;
-                    report.add(
-                        .critical,
-                        entry[2],
-                        "spectrum",
-                        "@id",
-                        "spectrum",
-                        item.id,
-                        if (in_a) item.id else "",
-                        if (in_a) "" else item.id,
-                    ) catch |err| break :consume err;
-                }
-                stream.advance();
-            }
-        }
-        paired_chromatograms = compareChromatograms(&report, scratch, kept.items, kept_b.items) catch |err| break :consume err;
-    };
+    const consumed = pair.run(allocator, &report, &a, &b, options.max_spectra);
 
     // Stop the readers (a no-op when they finished), free what they queued, and wait for them.
     side_a.queue.close(io);
     side_b.queue.close(io);
     if (a.current) |item| item.free(allocator);
     if (b.current) |item| item.free(allocator);
-    drain(allocator, io, side_a);
-    drain(allocator, io, side_b);
+    read.drain(allocator, io, side_a);
+    read.drain(allocator, io, side_b);
     future_a.await(io);
     future_b.await(io);
-    for (kept.items) |item| item.free(allocator);
-    for (kept_b.items) |item| item.free(allocator);
-    kept.deinit(allocator);
-    kept_b.deinit(allocator);
-    try consumed;
+    const counts = try consumed;
     if (side_a.failure) |err| return err;
     if (side_b.failure) |err| return err;
 
@@ -948,9 +427,9 @@ fn run(
     const outcome: output.Outcome = .{
         .a = .{ .path = side_a.path, .software = side_a.software, .spectra = side_a.spectra, .chromatograms = side_a.chromatograms },
         .b = .{ .path = side_b.path, .software = side_b.software, .spectra = side_b.spectra, .chromatograms = side_b.chromatograms },
-        .paired_spectra = paired,
-        .paired_chromatograms = paired_chromatograms,
-        .completion = if (stopped_early) .incomplete else .complete,
+        .paired_spectra = counts.spectra,
+        .paired_chromatograms = counts.chromatograms,
+        .completion = if (counts.stopped_early) .incomplete else .complete,
         .status = output.statusOf(classes, options.fail_on),
         .fail_on = options.fail_on,
         .totals = totals,
@@ -964,46 +443,11 @@ fn run(
         .quiet => {},
     }
     // Only the text forms say so themselves.
-    if (stopped_early and options.format != .text and options.mode != .quiet) std.debug.print(
+    if (counts.stopped_early and options.format != .text and options.mode != .quiet) std.debug.print(
         "mzdiff: stopped after {d} paired spectra (--max-spectra); the result is incomplete\n",
-        .{paired},
+        .{counts.spectra},
     );
     return outcome.status;
-}
-
-// Compares one pair of spectra. A pair whose positions run against the previous pair's (one file
-// forward, the other back) is filed as out of order; the pair itself is still compared.
-fn comparePair(report: *Report, scratch: std.mem.Allocator, kind: KeyKind, x: Item, y: Item, last: *?[2]usize) !void {
-    if (last.*) |previous| if ((x.position > previous[0]) != (y.position > previous[1])) {
-        var ta: [32]u8 = undefined;
-        var tb: [32]u8 = undefined;
-        try report.add(
-            null,
-            .order,
-            "spectrum",
-            "order",
-            "spectrum order",
-            x.id,
-            std.fmt.bufPrint(&ta, "spectrum {d}", .{x.position}) catch "",
-            std.fmt.bufPrint(&tb, "spectrum {d}", .{y.position}) catch "",
-        );
-    };
-    last.* = .{ x.position, y.position };
-    if (kind == .scan and !std.mem.eql(u8, x.id, y.id))
-        try report.add(null, .id_mismatch, "spectrum", "id", "native id", x.id, x.id, y.id);
-    try compare.diffFacts(report, x.id, x.facts, y.facts);
-    try compare.diffGrouping(report, scratch, x.id, x.facts, x.elements, y.facts, y.elements);
-    try compare.compareArrays(report, scratch, x.id, "spectrum", x.arrays, y.arrays);
-}
-
-fn reportUnpaired(report: *Report, item: Item, in_a: bool) !void {
-    report.record += 1;
-    const kind: Kind = if (in_a) .record_missing else .record_extra;
-    try report.add(.critical, kind, "spectrum", "@id", "spectrum", item.id, if (in_a) item.id else "", if (in_a) "" else item.id);
-}
-
-fn drain(allocator: std.mem.Allocator, io: std.Io, side: *Side) void {
-    while (side.queue.getOne(io)) |item| item.free(allocator) else |_| {}
 }
 
 fn collectRun(arena: std.mem.Allocator, rules: *Rules, facts: *std.ArrayList(Fact), header: *const model.Header) !void {
@@ -1012,62 +456,14 @@ fn collectRun(arena: std.mem.Allocator, rules: *Rules, facts: *std.ArrayList(Fac
     try compare.collect(arena, rules, facts, run_node, "", header.groups, &.{});
 }
 
-// Pairs chromatograms by type and id, then by type alone (TIC with TIC whatever its id), then by
-// id alone, so a list of same-typed SRM traces pairs by id rather than by position. Returns how
-// many pairs it compared.
-fn compareChromatograms(report: *Report, scratch: std.mem.Allocator, a: []Item, b: []Item) !usize {
-    var paired: usize = 0;
-    const partner = try scratch.alloc(?*Item, a.len);
-    @memset(partner, null);
-    inline for (.{ Match.type_and_id, Match.type_only, Match.id_only }) |how| {
-        for (a, partner) |*x, *slot| {
-            if (slot.* != null) continue;
-            slot.* = match(b, x, how);
-            if (slot.*) |y| y.used = true;
-        }
-    }
-    for (a, partner) |*x, slot| {
-        report.record += 1;
-        const y = slot orelse {
-            try report.add(.major, .record_missing, "chromatogram", "@id", "chromatogram", x.id, x.id, "");
-            continue;
-        };
-        try compare.diffFacts(report, x.id, x.facts, y.facts);
-        try compare.diffGrouping(report, scratch, x.id, x.facts, x.elements, y.facts, y.elements);
-        try compare.compareArrays(report, scratch, x.id, "chromatogram", x.arrays, y.arrays);
-        paired += 1;
-    }
-    for (b) |y| {
-        if (y.used) continue;
-        report.record += 1;
-        try report.add(.major, .record_extra, "chromatogram", "@id", "chromatogram", y.id, "", y.id);
-    }
-    return paired;
-}
-
-const Match = enum { type_and_id, type_only, id_only };
-
-fn match(list: []Item, x: *const Item, how: Match) ?*Item {
-    for (list) |*y| {
-        if (y.used) continue;
-        const same_type = x.type.len != 0 and std.mem.eql(u8, y.type, x.type);
-        const same_id = std.mem.eql(u8, y.id, x.id);
-        const hit = switch (how) {
-            .type_and_id => same_type and same_id,
-            .type_only => same_type,
-            .id_only => same_id,
-        };
-        if (hit) return y;
-    }
-    return null;
-}
-
 // --- Tests ---
 
 test {
     _ = compare;
     _ = html;
     _ = output;
+    _ = pair;
+    _ = read;
     _ = rules_mod;
 }
 
@@ -1108,18 +504,4 @@ test "[unit] - [arguments]: each mode, format, and selection combines only where
     try std.testing.expectEqual(output.Mode.list, options.mode);
     try std.testing.expectEqual(output.Format.json, options.format);
     try std.testing.expectEqualStrings("MS:1000016", options.selection.keys[0]);
-}
-
-test "[unit] - [pairing]: native ids with the same fields pair by the whole id" {
-    try std.testing.expect(sameIdFields("controllerType=0 controllerNumber=1 scan=5", "controllerType=0 controllerNumber=1 scan=9"));
-    try std.testing.expect(sameIdFields("function=2 process=0 scan=1", "function=3 process=0 scan=1"));
-    try std.testing.expect(sameIdFields("sample=1 period=1 cycle=22 experiment=1", "sample=1 period=1 cycle=3 experiment=2"));
-    try std.testing.expect(!sameIdFields("controllerType=0 controllerNumber=1 scan=5", "scan=5"));
-    try std.testing.expect(!sameIdFields("scan=19", "sample=1 period=1 cycle=22 experiment=1"));
-    try std.testing.expect(!sameIdFields("index=3", "index"));
-}
-
-test "[unit] - [pairing]: scan numbers come from the native id" {
-    try std.testing.expectEqual(@as(?u64, 42), scanNumber("controllerType=0 controllerNumber=1 scan=42"));
-    try std.testing.expectEqual(@as(?u64, null), scanNumber("index=3"));
 }
