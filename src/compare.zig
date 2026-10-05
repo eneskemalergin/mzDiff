@@ -109,6 +109,9 @@ pub const Class = struct {
     examples: std.ArrayList(Example) = .empty,
 };
 
+// The most difference classes a report keeps one by one; see `Report.add`.
+const MAX_CLASSES = 4096;
+
 pub const Report = struct {
     allocator: std.mem.Allocator,
     rules: *Rules,
@@ -212,8 +215,20 @@ pub const Report = struct {
             .array = array,
         });
         var key_buffer: [512]u8 = undefined;
-        const class_key = std.fmt.bufPrint(&key_buffer, "{s}\x1f{s}\x1f{s}", .{ path, key, @tagName(kind) }) catch
+        var class_key = std.fmt.bufPrint(&key_buffer, "{s}\x1f{s}\x1f{s}", .{ path, key, @tagName(kind) }) catch
             try std.fmt.allocPrint(self.allocator, "{s}\x1f{s}\x1f{s}", .{ path, key, @tagName(kind) });
+        // Past MAX_CLASSES, a new key joins one class per path and kind instead of making its own,
+        // so endless distinct keys in a file cannot grow the report without bound; the list and
+        // the sink still see every difference.
+        var class_name = name;
+        var class_name_key = key;
+        if (self.classes.count() >= MAX_CLASSES and !self.classes.contains(class_key)) {
+            if (class_key.ptr != &key_buffer) self.allocator.free(class_key);
+            class_key = std.fmt.bufPrint(&key_buffer, "{s}\x1f(more keys)\x1f{s}\x1f{s}", .{ path, @tagName(kind), @tagName(level) }) catch
+                try std.fmt.allocPrint(self.allocator, "{s}\x1f(more keys)\x1f{s}\x1f{s}", .{ path, @tagName(kind), @tagName(level) });
+            class_name_key = "(more keys)";
+            class_name = "keys past the class limit";
+        }
         defer if (class_key.ptr != &key_buffer) self.allocator.free(class_key);
         const entry = try self.classes.getOrPut(self.allocator, class_key);
         if (!entry.found_existing) {
@@ -224,8 +239,8 @@ pub const Report = struct {
                 .severity = level,
                 .kind = kind,
                 .path = try self.allocator.dupe(u8, path),
-                .key = try self.allocator.dupe(u8, key),
-                .name = try self.allocator.dupe(u8, if (name.len != 0) name else self.rules.name(key) orelse ""),
+                .key = try self.allocator.dupe(u8, class_name_key),
+                .name = try self.allocator.dupe(u8, if (class_name.len != 0) class_name else self.rules.name(key) orelse ""),
             };
             entry.key_ptr.* = owned_key;
             entry.value_ptr.* = class;
@@ -1349,6 +1364,28 @@ test "[property] - [facts]: sorting by path runs gives the same order as one ful
         try std.testing.expectEqualStrings(y.key, x.key);
         try std.testing.expectEqualStrings(y.text, x.text);
     }
+}
+
+test "[edge] - [report]: keys past the class limit join one class instead of growing the report" {
+    const allocator = std.testing.allocator;
+    var rules = Rules.init(allocator);
+    defer rules.deinit();
+    var report = Report.init(allocator, &rules, 3);
+    defer report.deinit();
+    var key_buffer: [32]u8 = undefined;
+    for (0..MAX_CLASSES + 500) |k| {
+        report.record = k;
+        const key = try std.fmt.bufPrint(&key_buffer, "user:k{d}", .{k});
+        try report.add(null, .extra, "spectrum", key, "", "scan=1", "", "v");
+    }
+    try std.testing.expectEqual(@as(usize, MAX_CLASSES + 1), report.classes.count());
+    const classes = try report.sorted(allocator);
+    defer allocator.free(classes);
+    var folded: usize = 0;
+    for (classes) |class| if (std.mem.eql(u8, class.key, "(more keys)")) {
+        folded = class.records;
+    };
+    try std.testing.expectEqual(@as(usize, 500), folded);
 }
 
 test "[unit] - [facts]: facts compare by value whatever the spelling and order" {

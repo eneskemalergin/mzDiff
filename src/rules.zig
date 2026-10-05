@@ -161,6 +161,9 @@ const ANCESTORS = [_]struct { []const u8, Severity }{
     .{ "MS:1000561", .ignored },
 };
 
+// The most accessions whose ancestry severity is remembered.
+const CACHE_LIMIT = 16384;
+
 pub const Rules = struct {
     allocator: std.mem.Allocator,
     vocabulary: ?*const cv.Vocabulary,
@@ -209,6 +212,8 @@ pub const Rules = struct {
         if (!std.mem.startsWith(u8, key, "MS:")) return .minor;
         if (self.cache.get(key)) |found| return found;
         const found = self.byAncestry(key);
+        // A file with endless distinct accessions must not grow the cache without bound.
+        if (self.cache.count() >= CACHE_LIMIT) return found;
         const owned = self.allocator.dupe(u8, key) catch return found;
         self.cache.put(self.allocator, owned, found) catch self.allocator.free(owned);
         return found;
