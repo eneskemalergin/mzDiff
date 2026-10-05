@@ -7,6 +7,9 @@
 //! list's lines, while `Outcome` (status, completion, totals) always describes the whole
 //! comparison. JSON is schema 1: the report and the summary are one document each, the list is
 //! JSON Lines ending with a summary line. Text may carry ANSI color; TSV and JSON never do.
+//!
+//! `Tally`, `describe`, `isTolerance`, `writeShortPath`, and `writeLargest` are public for the HTML
+//! view in `html.zig` only.
 
 const std = @import("std");
 
@@ -19,7 +22,7 @@ const Severity = rules_mod.Severity;
 
 pub const Mode = enum { report, summary, list, view, quiet };
 
-pub const Format = enum { text, tsv, json };
+pub const Format = enum { text, tsv, json, html };
 
 /// `same`: no difference at all; `tolerated`: none at or above `--fail-on`; `differs`: some.
 pub const Status = enum { same, tolerated, differs };
@@ -154,7 +157,7 @@ pub fn writeReport(
             }
             try out.writeAll(if (first) "]\n}\n" else "\n  ]\n}\n");
         },
-        .text => {
+        .text, .html => {
             try writeHeadText(out, style, outcome);
             var shown: usize = 0;
             var current: ?Severity = null;
@@ -188,7 +191,7 @@ pub fn writeReport(
 
 pub fn writeSummary(out: *std.Io.Writer, format: Format, style: Style, outcome: Outcome) !void {
     switch (format) {
-        .text => try writeSummaryLine(out, style, outcome),
+        .text, .html => try writeSummaryLine(out, style, outcome),
         .tsv => {
             try out.writeAll("completion\tstatus\tfail_on\tcritical\tmajor\tminor\ta_spectra\tb_spectra\tpaired_spectra\t" ++
                 "a_chromatograms\tb_chromatograms\tpaired_chromatograms\n");
@@ -236,7 +239,7 @@ pub const Lister = struct {
         };
         self.shown += 1;
         switch (self.format) {
-            .text => try self.text(difference),
+            .text, .html => try self.text(difference),
             .tsv => {
                 if (!self.started) try self.out.writeAll("record\tseverity\tkind\tpath\tkey\tname\ta\tb\n");
                 try writeTsvField(self.out, difference.record);
@@ -314,7 +317,7 @@ pub const Lister = struct {
     /// Ends the list: the summary line or object, and how many lines `--limit` held back.
     pub fn finish(self: *Lister, outcome: Outcome) !void {
         switch (self.format) {
-            .text => {
+            .text, .html => {
                 if (self.shown != 0) try self.out.writeByte('\n');
                 if (self.hidden != 0) try self.out.print("{d} more differences not shown (--limit)\n", .{self.hidden});
                 try writeSummaryLine(self.out, self.style, outcome);
@@ -333,7 +336,7 @@ pub const Layout = enum { unified, side_by_side };
 
 /// What a view counts while it renders: the records shown, each record's most severe difference,
 /// the keys by how many records they differ in, and whether the view grew too large to show.
-const Tally = struct {
+pub const Tally = struct {
     allocator: std.mem.Allocator,
     /// Records the view shows at most.
     records: usize,
@@ -347,7 +350,7 @@ const Tally = struct {
 
     const KeyCount = struct { name: []const u8, records: usize, last: usize };
 
-    fn deinit(self: *Tally) void {
+    pub fn deinit(self: *Tally) void {
         var it = self.keys.iterator();
         while (it.next()) |entry| {
             self.allocator.free(entry.key_ptr.*);
@@ -358,7 +361,7 @@ const Tally = struct {
     }
 
     /// Counts one shown difference; returns whether it opens a new record.
-    fn note(self: *Tally, difference: Difference) !bool {
+    pub fn note(self: *Tally, difference: Difference) !bool {
         const opens = !std.mem.eql(u8, self.last_record.items, difference.record);
         if (opens) {
             self.close();
@@ -386,12 +389,12 @@ const Tally = struct {
         try self.keys.put(self.allocator, key, .{ .name = name, .records = 1, .last = self.shown });
     }
 
-    fn close(self: *Tally) void {
+    pub fn close(self: *Tally) void {
         if (self.worst) |worst| self.differing[@intFromEnum(worst)] += 1;
         self.worst = null;
     }
 
-    fn total(self: *const Tally) usize {
+    pub fn total(self: *const Tally) usize {
         return self.differing[0] + self.differing[1] + self.differing[2];
     }
 
@@ -417,7 +420,7 @@ const Tally = struct {
 
     // How large the view would have been and what to narrow it by: a severity that would cut the
     // count under the cap, and the keys that hit the most records.
-    fn writeRefusal(self: *const Tally, out: *std.Io.Writer) !void {
+    pub fn writeRefusal(self: *const Tally, out: *std.Io.Writer) !void {
         try out.print("mzdiff: too large to view: {d} records differ (critical {d}, major {d}, minor {d});" ++
             " the view shows at most {d}.\n", .{ self.total(), self.differing[0], self.differing[1], self.differing[2], self.records });
         if (self.differing[0] != 0 and self.differing[0] <= self.records)
@@ -633,7 +636,7 @@ pub const Viewer = struct {
     }
 };
 
-fn writeLargest(w: *std.Io.Writer, array: compare.ArrayDetail) !void {
+pub fn writeLargest(w: *std.Io.Writer, array: compare.ArrayDetail) !void {
     try w.print("; largest at [{d}]: {d} against {d}", .{ array.largest, array.largest_a, array.largest_b });
 }
 
@@ -646,7 +649,7 @@ fn sideValue(difference: Difference, side: Viewer.Which) []const u8 {
     return if (difference.kind == here) "(present)" else "-";
 }
 
-fn isTolerance(kind: compare.Kind) bool {
+pub fn isTolerance(kind: compare.Kind) bool {
     return switch (kind) {
         .narrow, .rounding, .ppm, .precision, .peak_order => true,
         else => false,
@@ -655,7 +658,7 @@ fn isTolerance(kind: compare.Kind) bool {
 
 // The left-hand name of a difference: what it is, and what about it differs when that is not its
 // value ("base peak m/z (unit)").
-fn describe(buffer: []u8, difference: Difference) []const u8 {
+pub fn describe(buffer: []u8, difference: Difference) []const u8 {
     const name = if (difference.name.len != 0) difference.name else difference.key;
     const aspect: ?[]const u8 = switch (difference.kind) {
         .record_missing, .record_extra => return difference.path,
@@ -756,7 +759,7 @@ fn orNone(text: []const u8) []const u8 {
 }
 
 // Drops the list levels, which add length but no meaning: spectrum/scanList/scan -> spectrum/scan.
-fn writeShortPath(out: *std.Io.Writer, path: []const u8) !void {
+pub fn writeShortPath(out: *std.Io.Writer, path: []const u8) !void {
     var parts = std.mem.splitScalar(u8, path, '/');
     var first = true;
     while (parts.next()) |part| {

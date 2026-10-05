@@ -21,6 +21,7 @@ const mzml = zmz.mzml;
 const model = mzml.model;
 
 const compare = @import("compare.zig");
+const html = @import("html.zig");
 const output = @import("output.zig");
 const rules_mod = @import("rules.zig");
 
@@ -44,6 +45,7 @@ const USAGE =
     \\How to show it (text by default):
     \\  --json             JSON: one document, or JSON Lines with --list
     \\  --tsv              tab-separated rows
+    \\  --html             with --view: one self-contained, interactive HTML page
     \\  --color WHEN       auto (default), always, or never; text only
     \\  --side-by-side     with --view: A and B in two columns
     \\  --width N          with --side-by-side: the line width (default COLUMNS, else 160)
@@ -208,10 +210,10 @@ fn parse(arena: std.mem.Allocator, args: []const []const u8, rules: *Rules, prob
             if (mode_flag) |earlier| return p.fail("{s} and {s} are both modes; pick one", .{ earlier, arg });
             mode_flag = arg;
             options.mode = mode;
-        } else if (std.mem.eql(u8, arg, "--json") or std.mem.eql(u8, arg, "--tsv")) {
+        } else if (formatOf(arg)) |format| {
             if (format_flag) |earlier| return p.fail("{s} and {s} are both formats; pick one", .{ earlier, arg });
             format_flag = arg;
-            options.format = if (arg[2] == 'j') .json else .tsv;
+            options.format = format;
         } else if (std.mem.eql(u8, arg, "--color")) {
             const text = try p.value(arg);
             options.color = std.meta.stringToEnum(Color, text) orelse return p.fail(
@@ -265,9 +267,13 @@ fn parse(arena: std.mem.Allocator, args: []const []const u8, rules: *Rules, prob
     switch (options.mode) {
         .quiet => if (format_flag) |flag| return p.fail("--quiet prints nothing, so {s} does not apply", .{flag}),
         .summary => if (selection_flag) |flag| return p.fail("--summary counts everything, so {s} does not apply", .{flag}),
-        .view => if (format_flag) |flag| return p.fail("--view is for people; for programs, use --list {s}", .{flag}),
+        .view => if (options.format == .json or options.format == .tsv)
+            return p.fail("--view is for people; for programs, use --list {s}", .{format_flag.?}),
         .report, .list => {},
     }
+    if (options.format == .html and options.mode != .view) return p.fail("--html works with --view", .{});
+    if (options.format == .html and options.layout == .side_by_side)
+        return p.fail("--html has both layouts; switch between them on the page", .{});
     if (options.mode != .list and options.mode != .view) if (list_flag) |flag| return p.fail("{s} works with --list or --view", .{flag});
     if (options.mode != .view) if (view_flag) |flag| return p.fail("{s} works with --view", .{flag});
     if (options.mode == .view and options.layout == .unified and options.width != null)
@@ -278,6 +284,13 @@ fn parse(arena: std.mem.Allocator, args: []const []const u8, rules: *Rules, prob
     options.selection.keys = keys.items;
     options.selection.records = records.items;
     return options;
+}
+
+fn formatOf(arg: []const u8) ?output.Format {
+    if (std.mem.eql(u8, arg, "--json")) return .json;
+    if (std.mem.eql(u8, arg, "--tsv")) return .tsv;
+    if (std.mem.eql(u8, arg, "--html")) return .html;
+    return null;
 }
 
 fn modeOf(arg: []const u8) ?output.Mode {
@@ -755,7 +768,10 @@ fn run(
     viewer.layout = options.layout;
     viewer.width = options.width orelse 160;
     if (options.selection.limit) |limit| viewer.tally.records = limit;
-    if (options.mode == .view) report.sink = viewer.sink();
+    var page = html.Page.init(allocator, out, options.selection);
+    defer page.deinit();
+    if (options.selection.limit) |limit| page.tally.records = limit;
+    if (options.mode == .view) report.sink = if (options.format == .html) page.sink() else viewer.sink();
     // B's broken index trailer is a difference, reported whether or not the header is compared; the
     // reference's is only worth a warning.
     if (side_b.trailer) |problem|
@@ -944,7 +960,7 @@ fn run(
         .report => try output.writeReport(out, options.format, style, outcome, classes, options.selection),
         .summary => try output.writeSummary(out, options.format, style, outcome),
         .list => try lister.finish(outcome),
-        .view => try viewer.finish(outcome),
+        .view => if (options.format == .html) try page.finish(outcome) else try viewer.finish(outcome),
         .quiet => {},
     }
     // Only the text forms say so themselves.
@@ -1050,6 +1066,7 @@ fn match(list: []Item, x: *const Item, how: Match) ?*Item {
 
 test {
     _ = compare;
+    _ = html;
     _ = output;
     _ = rules_mod;
 }
@@ -1068,6 +1085,7 @@ test "[unit] - [arguments]: each mode, format, and selection combines only where
         .{ .args = &.{ "--view", "--json" }, .problem = "--view is for people; for programs, use --list --json" },
         .{ .args = &.{"--side-by-side"}, .problem = "--side-by-side works with --view" },
         .{ .args = &.{ "--view", "--width", "120" }, .problem = "--width works with --side-by-side" },
+        .{ .args = &.{"--html"}, .problem = "--html works with --view" },
         .{ .args = &.{ "--list", "--examples", "2" }, .problem = "--examples applies to the report only" },
         .{ .args = &.{ "--severity", "ignored" }, .problem = "--severity takes critical, major, or minor, not 'ignored'" },
         .{ .args = &.{ "--set", "MS:1000511" }, .problem = "--set takes KEY=LEVEL, not 'MS:1000511'" },
