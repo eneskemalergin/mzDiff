@@ -367,34 +367,37 @@ CASES = [
 ]
 
 failed = 0
-for name, edit, expect in CASES:
-    if ONLY and name not in ONLY:
-        continue
-    try:
-        mutated = edit(text)
-    except Skip as reason:
-        print(f"{name:24} skip   {reason}")
-        continue
-    if mutated == text:
-        print(f"{name:24} skip   the edit found nothing to change")
-        continue
-    open(out, "w", encoding="utf-8").write(mutated)
-    run = subprocess.run([MZDIFF, "--tsv", REF, out], capture_output=True, text=True)
-    rows = [r.split("\t") for r in run.stdout.splitlines()[1:]]
-    if expect != "indexListOffset":
-        rows = [r for r in rows if r[4] != "indexListOffset"]
-    serious = {r[4] for r in rows if r[0] in ("critical", "major")}
-    minor = {r[1] for r in rows if r[0] == "minor"}
-    if expect == EXIT2:
-        ok = run.returncode == 2
-    elif expect is None:
-        ok = run.returncode in (0, 1) and not rows
-    elif expect.startswith("minor:"):
-        ok = run.returncode in (0, 1) and not serious and expect[len("minor:"):] in minor
-    else:
-        ok = expect in serious
-    failed += not ok
-    got = f"exit {run.returncode}" if run.returncode == 2 else (", ".join(sorted(serious) + [f"minor:{k}" for k in sorted(minor)]) or "same")
-    print(f"{name:24} {'ok    ' if ok else 'FAIL  '} expected {expect or 'same'}; got {got}")
-os.remove(out)
+# The scratch file goes whatever happens to a case.
+try:
+    for name, edit, expect in CASES:
+        if ONLY and name not in ONLY:
+            continue
+        try:
+            mutated = edit(text)
+        except Skip as reason:
+            print(f"{name:24} skip   {reason}")
+            continue
+        if mutated == text:
+            print(f"{name:24} skip   the edit found nothing to change")
+            continue
+        open(out, "w", encoding="utf-8").write(mutated)
+        run = subprocess.run([MZDIFF, "--tsv", REF, out], capture_output=True, text=True)
+        rows = [r.split("\t") for r in run.stdout.splitlines()[1:]]
+        if expect != "indexListOffset":
+            rows = [r for r in rows if r[4] != "indexListOffset"]
+        serious = {r[4] for r in rows if r[0] in ("critical", "major")}
+        minor = {r[1] for r in rows if r[0] == "minor"}
+        if expect == EXIT2:
+            ok = run.returncode == 2
+        elif expect is None:
+            ok = run.returncode in (0, 1) and not rows
+        elif expect.startswith("minor:"):
+            ok = run.returncode in (0, 1) and not serious and expect[len("minor:"):] in minor
+        else:
+            ok = expect in serious
+        failed += not ok
+        got = f"exit {run.returncode}" if run.returncode == 2 else (", ".join(sorted(serious) + [f"minor:{k}" for k in sorted(minor)]) or "same")
+        print(f"{name:24} {'ok    ' if ok else 'FAIL  '} expected {expect or 'same'}; got {got}")
+finally:
+    os.remove(out)
 sys.exit(1 if failed else 0)
