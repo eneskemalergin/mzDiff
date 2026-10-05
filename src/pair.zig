@@ -145,6 +145,7 @@ pub const Counts = struct { spectra: usize = 0, chromatograms: usize = 0, stoppe
 /// after `max_spectra` pairs when given. Leaves each stream's current item for the caller to free.
 pub fn run(allocator: std.mem.Allocator, report: *Report, a: *read.Stream, b: *read.Stream, max_spectra: ?usize) !Counts {
     var counts: Counts = .{};
+    // Chromatograms left without a partner by id, for the pass by type; bounded by the window.
     var kept: std.ArrayList(Item) = .empty;
     defer {
         for (kept.items) |item| item.free(allocator);
@@ -155,6 +156,10 @@ pub fn run(allocator: std.mem.Allocator, report: *Report, a: *read.Stream, b: *r
         for (kept_b.items) |item| item.free(allocator);
         kept_b.deinit(allocator);
     }
+    var chromatograms_a: Pending = .{};
+    defer chromatograms_a.deinit(allocator);
+    var chromatograms_b: Pending = .{};
+    defer chromatograms_b.deinit(allocator);
     var scratch_state = std.heap.ArenaAllocator.init(allocator);
     defer scratch_state.deinit();
     const scratch = scratch_state.allocator();
@@ -218,35 +223,56 @@ pub fn run(allocator: std.mem.Allocator, report: *Report, a: *read.Stream, b: *r
             reportUnpaired(report, item, entry[1]) catch |err| return err;
         }
     }
-    // What is left: unpaired spectra, then chromatograms, which are few and paired by type.
-    inline for (.{ .{ a, &kept, Kind.record_missing }, .{ b, &kept_b, Kind.record_extra } }) |entry| {
-        const stream = entry[0];
-        while (stream.current != null) {
-            const item = stream.take();
-            if (item.kind == .chromatogram) {
-                entry[1].append(allocator, item) catch |err| {
-                    item.free(allocator);
-                    return err;
-                };
-            } else {
-                defer item.free(allocator);
-                report.record += 1;
-                const in_a = entry[2] == .record_missing;
-                report.add(
-                    .critical,
-                    entry[2],
-                    "spectrum",
-                    "@id",
-                    "spectrum",
-                    item.id,
-                    if (in_a) item.id else "",
-                    if (in_a) "" else item.id,
-                ) catch |err| return err;
+    // Chromatograms, through the same bounded join keyed by id; a spectrum after them (out of
+    // place in mzML) is reported unpaired.
+    while (a.current != null or b.current != null) {
+        inline for (.{ .{ a, &chromatograms_a, &chromatograms_b, true }, .{ b, &chromatograms_b, &chromatograms_a, false } }) |entry| {
+            const stream = entry[0];
+            if (stream.current != null) {
+                const item = stream.take();
+                stream.advance();
+                seq += 1;
+                const in_a = entry[3];
+                if (item.kind != .chromatogram) {
+                    defer item.free(allocator);
+                    try reportUnpaired(report, item, in_a);
+                } else if (entry[2].take(allocator, item.id)) |partner| {
+                    const x = if (in_a) item else partner;
+                    const y = if (in_a) partner else item;
+                    defer x.free(allocator);
+                    defer y.free(allocator);
+                    _ = scratch_state.reset(.retain_capacity);
+                    try compareChromatogram(report, scratch, x, y);
+                    counts.chromatograms += 1;
+                } else if (entry[1].contains(item.id)) {
+                    defer item.free(allocator);
+                    try reportUnpaired(report, item, in_a);
+                } else {
+                    entry[1].put(allocator, item.id, item, seq) catch |err| {
+                        item.free(allocator);
+                        return err;
+                    };
+                    while (entry[1].full()) {
+                        const old = entry[1].oldest(allocator).?;
+                        defer old.free(allocator);
+                        try reportUnpaired(report, old, in_a);
+                    }
+                }
             }
-            stream.advance();
         }
     }
-    counts.chromatograms = try compareChromatograms(report, scratch, kept.items, kept_b.items);
+    // The rest pair by type when it is a type both sides have once more (TIC with TIC whatever
+    // its id); the window keeps them few.
+    inline for (.{ .{ &chromatograms_a, &kept }, .{ &chromatograms_b, &kept_b } }) |entry| {
+        while (entry[0].oldest(allocator)) |item| {
+            entry[1].append(allocator, item) catch |err| {
+                item.free(allocator);
+                return err;
+            };
+        }
+    }
+    _ = scratch_state.reset(.retain_capacity);
+    counts.chromatograms += try pairByType(report, scratch, kept.items, kept_b.items);
     return counts;
 }
 
@@ -275,59 +301,43 @@ fn comparePair(report: *Report, scratch: std.mem.Allocator, kind: KeyKind, x: It
     try compare.compareArrays(report, scratch, x.id, "spectrum", x.arrays, y.arrays);
 }
 
+// A missing or extra spectrum is critical; a chromatogram, which summarises spectra compared
+// themselves, is major.
 fn reportUnpaired(report: *Report, item: Item, in_a: bool) !void {
     report.record += 1;
     const kind: Kind = if (in_a) .record_missing else .record_extra;
-    try report.add(.critical, kind, "spectrum", "@id", "spectrum", item.id, if (in_a) item.id else "", if (in_a) "" else item.id);
+    const spectrum = item.kind != .chromatogram;
+    const what = if (spectrum) "spectrum" else "chromatogram";
+    try report.add(if (spectrum) .critical else .major, kind, what, "@id", what, item.id, if (in_a) item.id else "", if (in_a) "" else item.id);
 }
 
-// Pairs chromatograms by type and id, then by type alone (TIC with TIC whatever its id), then by
-// id alone, so a list of same-typed SRM traces pairs by id rather than by position. Returns how
-// many pairs it compared.
-fn compareChromatograms(report: *Report, scratch: std.mem.Allocator, a: []Item, b: []Item) !usize {
+fn compareChromatogram(report: *Report, scratch: std.mem.Allocator, x: Item, y: Item) !void {
+    report.record += 1;
+    try compare.diffFacts(report, x.id, x.facts, y.facts);
+    try compare.diffGrouping(report, scratch, x.id, x.facts, x.elements, y.facts, y.elements);
+    try compare.compareArrays(report, scratch, x.id, "chromatogram", x.arrays, y.arrays);
+}
+
+// Pairs the chromatograms no id matched by their type (TIC with TIC whatever the id); reports the
+// rest unpaired. Returns how many pairs it compared.
+fn pairByType(report: *Report, scratch: std.mem.Allocator, a: []Item, b: []Item) !usize {
     var paired: usize = 0;
-    const partner = try scratch.alloc(?*Item, a.len);
-    @memset(partner, null);
-    inline for (.{ Match.type_and_id, Match.type_only, Match.id_only }) |how| {
-        for (a, partner) |*x, *slot| {
-            if (slot.* != null) continue;
-            slot.* = match(b, x, how);
-            if (slot.*) |y| y.used = true;
-        }
-    }
-    for (a, partner) |*x, slot| {
-        report.record += 1;
-        const y = slot orelse {
-            try report.add(.major, .record_missing, "chromatogram", "@id", "chromatogram", x.id, x.id, "");
+    for (a) |*x| {
+        const y = match(b, x) orelse {
+            try reportUnpaired(report, x.*, true);
             continue;
         };
-        try compare.diffFacts(report, x.id, x.facts, y.facts);
-        try compare.diffGrouping(report, scratch, x.id, x.facts, x.elements, y.facts, y.elements);
-        try compare.compareArrays(report, scratch, x.id, "chromatogram", x.arrays, y.arrays);
+        y.used = true;
+        try compareChromatogram(report, scratch, x.*, y.*);
         paired += 1;
     }
-    for (b) |y| {
-        if (y.used) continue;
-        report.record += 1;
-        try report.add(.major, .record_extra, "chromatogram", "@id", "chromatogram", y.id, "", y.id);
-    }
+    for (b) |y| if (!y.used) try reportUnpaired(report, y, false);
     return paired;
 }
 
-const Match = enum { type_and_id, type_only, id_only };
-
-fn match(list: []Item, x: *const Item, how: Match) ?*Item {
-    for (list) |*y| {
-        if (y.used) continue;
-        const same_type = x.type.len != 0 and std.mem.eql(u8, y.type, x.type);
-        const same_id = std.mem.eql(u8, y.id, x.id);
-        const hit = switch (how) {
-            .type_and_id => same_type and same_id,
-            .type_only => same_type,
-            .id_only => same_id,
-        };
-        if (hit) return y;
-    }
+fn match(list: []Item, x: *const Item) ?*Item {
+    if (x.type.len == 0) return null;
+    for (list) |*y| if (!y.used and std.mem.eql(u8, y.type, x.type)) return y;
     return null;
 }
 

@@ -57,7 +57,7 @@ const USAGE =
     \\  --key KEY          only this key; repeat for more
     \\  --record ID        only this record, by its native id (--list, --view); repeat for more
     \\  --limit N          print at most N differences (--list), or view at most N records
-    \\                     (--view, default 40)
+    \\                     (--view: default 40, or 500 with --html)
     \\  --examples N       examples per class in the report (default 3)
     \\
     \\Compare:
@@ -124,6 +124,9 @@ pub fn main(init: std.process.Init) u8 {
     var stdout = std.Io.File.stdout().writer(io, &out_buffer);
     const out = &stdout.interface;
     const status = run(allocator, io, out, &rules, options, style, interactive) catch |err| {
+        // A JSON Lines stream that stops early says so, so its reader cannot mistake it for complete.
+        if (options.mode == .list and options.format == .json)
+            out.print("{{\"type\": \"error\", \"error\": \"{s}\"}}\n", .{@errorName(err)}) catch {};
         out.flush() catch {};
         // A reader that closed the pipe (`| head`) has what it wanted.
         if (err == error.WriteFailed and brokenPipe(&stdout)) return 0;

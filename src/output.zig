@@ -334,6 +334,9 @@ pub const Lister = struct {
 
 pub const Layout = enum { unified, side_by_side };
 
+// The most distinct keys a view counts for its refusal's suggestions.
+const MAX_KEYS = 4096;
+
 /// What a view counts while it renders: the records shown, each record's most severe difference,
 /// the keys by how many records they differ in, and whether the view grew too large to show.
 pub const Tally = struct {
@@ -382,6 +385,8 @@ pub const Tally = struct {
             found.records += 1;
             return;
         }
+        // Enough keys to suggest the frequent ones; beyond, new keys go uncounted.
+        if (self.keys.count() >= MAX_KEYS) return;
         const key = try self.allocator.dupe(u8, difference.key);
         errdefer self.allocator.free(key);
         const name = try self.allocator.dupe(u8, difference.name);

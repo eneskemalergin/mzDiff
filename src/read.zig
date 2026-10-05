@@ -214,10 +214,12 @@ fn makeItem(side: *Side, record: model.Record) !Item {
             type_key = fact.key;
     }
     // Each scan's instrument configuration, named or the run's default, as component facts. The
-    // configuration facts live as long as the side; only the element they belong to is new.
+    // configuration facts live as long as the side; only the element they belong to is new. The
+    // scan elements and the scan nodes are both in document order, so one pass walks them together.
+    var scans = Scans.of(record.node);
     for (elements.items, 0..) |element, position| {
         if (!std.mem.eql(u8, element.path, SCAN_PATH)) continue;
-        const scan = nthScan(record.node, scanOrdinal(elements.items, position)) orelse continue;
+        const scan = scans.next() orelse continue;
         const ref = scan.attribute("instrumentConfigurationRef") orelse side.default_configuration orelse continue;
         const components = side.configurations.get(ref) orelse {
             try facts.append(arena, compare.makeFact(SCAN_PATH, "instrumentConfiguration", "", ref, "", @intCast(position)));
@@ -243,22 +245,25 @@ fn makeItem(side: *Side, record: model.Record) !Item {
     };
 }
 
-// Which scan (0 for the first) the element at `position` is among the record's scans.
-fn scanOrdinal(elements: []const compare.Element, position: usize) usize {
-    var count: usize = 0;
-    for (elements[0..position]) |element| count += @intFromBool(std.mem.eql(u8, element.path, SCAN_PATH));
-    return count;
-}
+// A spectrum's scan nodes, in document order.
+const Scans = struct {
+    children: []const model.Node,
+    at: usize = 0,
 
-fn nthScan(spectrum: model.Node, ordinal: usize) ?model.Node {
-    const list = spectrum.child(.scan_list) orelse return null;
-    var count: usize = 0;
-    for (list.children) |child| if (child.kind == .scan) {
-        if (count == ordinal) return child;
-        count += 1;
-    };
-    return null;
-}
+    fn of(spectrum: model.Node) Scans {
+        const list = spectrum.child(.scan_list) orelse return .{ .children = &.{} };
+        return .{ .children = list.children };
+    }
+
+    fn next(self: *Scans) ?model.Node {
+        while (self.at < self.children.len) {
+            const child = self.children[self.at];
+            self.at += 1;
+            if (child.kind == .scan) return child;
+        }
+        return null;
+    }
+};
 
 // The reader stops at </mzML>, so the indexed wrapper's tail is checked here: it must end with
 // indexListOffset, fileChecksum, and </indexedmzML>, and the offset must point at <indexList
