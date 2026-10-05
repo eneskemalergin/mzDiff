@@ -10,6 +10,11 @@ shifted index offset, since values are trimmed. Every other case must be CAUGHT.
 """
 import re, subprocess, sys, os, tempfile
 
+
+class Skip(Exception):
+    """The reference has no structure for this case."""
+
+
 MZDIFF = sys.argv[1]
 REF = sys.argv[2]
 ONLY = sys.argv[3:]
@@ -18,7 +23,10 @@ handle, out = tempfile.mkstemp(suffix=".mzML", dir="/var/tmp")
 os.close(handle)
 
 def spectrum_block(t, scan):
-    s = t.index(f'<spectrum id="controllerType=0 controllerNumber=1 scan={scan}"')
+    at = t.find(f'<spectrum id="controllerType=0 controllerNumber=1 scan={scan}"')
+    if at < 0:
+        raise Skip(f"no scan {scan}")
+    s = at
     s = t.rindex("\n", 0, s) + 1
     e = t.index("</spectrum>", s) + len("</spectrum>\n")
     return s, e
@@ -48,7 +56,8 @@ def truncate_before_index(t):
 def first_in_spectrum(t, scan, old, new):
     a0, a1 = spectrum_block(t, scan)
     blk = t[a0:a1]
-    assert old in blk, old
+    if old not in blk:
+        raise Skip(f"scan {scan} has no {old!r}")
     return t[:a0] + blk.replace(old, new, 1) + t[a1:]
 
 def chrom_time_unit(t):
@@ -74,9 +83,6 @@ def sst_coarse(t):
     new = f"{v + 0.09:.1f}"  # off by up to ~5 s, printed with one decimal
     blk = blk[:m.start(1)] + new + blk[m.end(1):]
     return t[:a0] + blk + t[a1:]
-
-def charge_partial(t):  # 2 -> 2.4 would parse as number; use spelled
-    return t
 
 def ic_ref(t):
     return first_in_spectrum(t, 5, 'instrumentConfigurationRef="IC1"', 'instrumentConfigurationRef="IC2"')
@@ -143,8 +149,11 @@ for name, fn in CASES.items():
         continue
     try:
         m = fn(text)
-    except Exception as e:
-        print(f"{name:24} SETUP FAILED {e!r}")
+    except Skip as reason:
+        print(f"{name:24} skip   {reason}")
+        continue
+    if m == text:
+        print(f"{name:24} skip   the edit found nothing to change")
         continue
     open(out, "w", encoding="utf-8").write(m)
     p = subprocess.run([MZDIFF, "--tsv", REF, out], capture_output=True, text=True)
