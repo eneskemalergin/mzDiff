@@ -33,39 +33,70 @@ pub const Severity = enum {
 
 const EXACT = std.StaticStringMap(Severity).initComptime(.{
     // Spectrum identity and data.
-    .{ "MS:1000511", .critical }, // ms level
-    .{ "MS:1000016", .critical }, // scan start time
-    .{ "MS:1000827", .critical }, // isolation window target m/z
-    .{ "MS:1000744", .critical }, // selected ion m/z
-    .{ "MS:1000040", .critical }, // m/z (historical selected ion m/z)
-    .{ "MS:1000041", .critical }, // charge state
-    .{ "array:MS:1000514", .critical }, // m/z array
-    .{ "array:MS:1000515", .critical }, // intensity array
-    .{ "array:MS:1000595", .critical }, // time array
+    // ms level
+    .{ "MS:1000511", .critical },
+    // scan start time
+    .{ "MS:1000016", .critical },
+    // isolation window target m/z
+    .{ "MS:1000827", .critical },
+    // selected ion m/z
+    .{ "MS:1000744", .critical },
+    // m/z (historical selected ion m/z)
+    .{ "MS:1000040", .critical },
+    // charge state
+    .{ "MS:1000041", .critical },
+    // m/z array
+    .{ "array:MS:1000514", .critical },
+    // intensity array
+    .{ "array:MS:1000515", .critical },
+    // time array
+    .{ "array:MS:1000595", .critical },
+
     // Values readers use.
-    .{ "MS:1000828", .major }, // isolation window lower offset
-    .{ "MS:1000829", .major }, // isolation window upper offset
-    .{ "MS:1000045", .major }, // collision energy
-    .{ "MS:1002680", .major }, // supplemental collision energy
-    .{ "MS:1000512", .major }, // filter string
-    .{ "MS:1000927", .major }, // ion injection time
-    .{ "MS:1000501", .major }, // scan window lower limit
-    .{ "MS:1000500", .major }, // scan window upper limit
-    .{ "MS:1000285", .major }, // total ion current
-    .{ "MS:1000504", .major }, // base peak m/z
-    .{ "MS:1000505", .major }, // base peak intensity
-    .{ "MS:1000528", .major }, // lowest observed m/z
-    .{ "MS:1000527", .major }, // highest observed m/z
-    .{ "MS:1001581", .major }, // FAIMS compensation voltage
-    .{ "MS:1000042", .major }, // peak intensity (selected ion)
-    .{ "MS:1000569", .major }, // SHA-1 of the source file
-    .{ "MS:1000529", .major }, // instrument serial number
+    // isolation window lower offset
+    .{ "MS:1000828", .major },
+    // isolation window upper offset
+    .{ "MS:1000829", .major },
+    // collision energy
+    .{ "MS:1000045", .major },
+    // supplemental collision energy
+    .{ "MS:1002680", .major },
+    // filter string
+    .{ "MS:1000512", .major },
+    // ion injection time
+    .{ "MS:1000927", .major },
+    // scan window lower limit
+    .{ "MS:1000501", .major },
+    // scan window upper limit
+    .{ "MS:1000500", .major },
+    // total ion current
+    .{ "MS:1000285", .major },
+    // base peak m/z
+    .{ "MS:1000504", .major },
+    // base peak intensity
+    .{ "MS:1000505", .major },
+    // lowest observed m/z
+    .{ "MS:1000528", .major },
+    // highest observed m/z
+    .{ "MS:1000527", .major },
+    // FAIMS compensation voltage
+    .{ "MS:1001581", .major },
+    // peak intensity (selected ion)
+    .{ "MS:1000042", .major },
+    // SHA-1 of the source file
+    .{ "MS:1000569", .major },
+    // instrument serial number
+    .{ "MS:1000529", .major },
     .{ "@spectrumRef", .major },
     .{ "id", .major },
-    .{ "indexed", .major }, // the indexedmzML wrapper, present or not
-    .{ "indexListOffset", .major }, // the wrapper's tail: present, and pointing at the index // native id of spectra paired by scan number
-    .{ "instrumentConfiguration", .major }, // a scan naming a configuration the header lacks
+    // the indexedmzML wrapper, present or not
+    .{ "indexed", .major },
+    // the wrapper's tail: present, and pointing at the index // native id of spectra paired by scan number
+    .{ "indexListOffset", .major },
+    // a scan naming a configuration the header lacks
+    .{ "instrumentConfiguration", .major },
     .{ "@startTimeStamp", .major },
+
     // Bookkeeping that differs between tools by design.
     .{ "@id", .ignored },
     .{ "@index", .ignored },
@@ -83,31 +114,48 @@ const EXACT = std.StaticStringMap(Severity).initComptime(.{
     .{ "@defaultSourceFileRef", .ignored },
     .{ "@instrumentConfigurationRef", .ignored },
     .{ "@scanSettingsRef", .ignored },
-    .{ "@defaultArrayLength", .ignored }, // checked through the arrays
+    // checked through the arrays
+    .{ "@defaultArrayLength", .ignored },
     .{ "@arrayLength", .ignored },
     .{ "@encodedLength", .ignored },
     .{ "@nativeID", .ignored },
     .{ "@externalSpectrumID", .ignored },
-    .{ "MS:1000799", .ignored }, // custom unreleased software tool
-    .{ "MS:1000544", .ignored }, // conversion to mzML
-    .{ "MS:1000035", .ignored }, // peak picking (a processing claim, not data)
-    .{ "MS:1000796", .ignored }, // spectrum title
+    // custom unreleased software tool
+    .{ "MS:1000799", .ignored },
+    // conversion to mzML
+    .{ "MS:1000544", .ignored },
+    // peak picking (a processing claim, not data)
+    .{ "MS:1000035", .ignored },
+    // spectrum title
+    .{ "MS:1000796", .ignored },
 });
 
 // Checked in order; the first ancestor that matches decides.
 const ANCESTORS = [_]struct { []const u8, Severity }{
-    .{ "MS:1000044", .critical }, // dissociation method
-    .{ "MS:1000465", .critical }, // scan polarity
-    .{ "MS:1000525", .critical }, // spectrum representation
-    .{ "MS:1000559", .critical }, // spectrum type
-    .{ "MS:1000031", .critical }, // instrument model
-    .{ "MS:1000443", .major }, // mass analyzer type
-    .{ "MS:1000008", .major }, // ionization type
-    .{ "MS:1000026", .major }, // detector type
-    .{ "MS:1000626", .major }, // chromatogram type
-    .{ "MS:1000518", .ignored }, // binary data type
-    .{ "MS:1000572", .ignored }, // binary data compression type
-    .{ "MS:1000561", .ignored }, // data file checksum type (other than SHA-1, kept above)
+    // dissociation method
+    .{ "MS:1000044", .critical },
+    // scan polarity
+    .{ "MS:1000465", .critical },
+    // spectrum representation
+    .{ "MS:1000525", .critical },
+    // spectrum type
+    .{ "MS:1000559", .critical },
+    // instrument model
+    .{ "MS:1000031", .critical },
+    // mass analyzer type
+    .{ "MS:1000443", .major },
+    // ionization type
+    .{ "MS:1000008", .major },
+    // detector type
+    .{ "MS:1000026", .major },
+    // chromatogram type
+    .{ "MS:1000626", .major },
+    // binary data type
+    .{ "MS:1000518", .ignored },
+    // binary data compression type
+    .{ "MS:1000572", .ignored },
+    // data file checksum type (other than SHA-1, kept above)
+    .{ "MS:1000561", .ignored },
 };
 
 pub const Rules = struct {
@@ -200,11 +248,16 @@ test "ancestry classifies activation methods, polarity and models" {
     var rules = Rules.init(std.testing.allocator);
     defer rules.deinit();
     try std.testing.expect(rules.vocabulary != null);
-    try std.testing.expectEqual(Severity.critical, rules.severity("MS:1000422")); // beam-type CID
-    try std.testing.expectEqual(Severity.critical, rules.severity("MS:1000598")); // ETD
-    try std.testing.expectEqual(Severity.critical, rules.severity("MS:1000130")); // positive scan
-    try std.testing.expectEqual(Severity.critical, rules.severity("MS:1002416")); // Orbitrap Fusion
-    try std.testing.expectEqual(Severity.ignored, rules.severity("MS:1000574")); // zlib
+    // beam-type CID
+    try std.testing.expectEqual(Severity.critical, rules.severity("MS:1000422"));
+    // ETD
+    try std.testing.expectEqual(Severity.critical, rules.severity("MS:1000598"));
+    // positive scan
+    try std.testing.expectEqual(Severity.critical, rules.severity("MS:1000130"));
+    // Orbitrap Fusion
+    try std.testing.expectEqual(Severity.critical, rules.severity("MS:1002416"));
+    // zlib
+    try std.testing.expectEqual(Severity.ignored, rules.severity("MS:1000574"));
 }
 
 test "overrides win over everything" {

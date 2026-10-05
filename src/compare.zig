@@ -784,9 +784,12 @@ fn arrayUnit(node: model.Node, groups: []const cv.Group) ![]const u8 {
 
 fn isEncodingTerm(accession: []const u8) bool {
     const terms = [_][]const u8{
-        "MS:1000519", "MS:1000520", "MS:1000521", "MS:1000522", "MS:1000523", // primitives
-        "MS:1000574", "MS:1000576", // zlib, none
-        "MS:1002312", "MS:1002313", "MS:1002314", "MS:1002746", "MS:1002747", "MS:1002748", // numpress
+        // primitives
+        "MS:1000519", "MS:1000520", "MS:1000521", "MS:1000522", "MS:1000523",
+        // zlib, none
+        "MS:1000574", "MS:1000576",
+        // numpress
+        "MS:1002312", "MS:1002313", "MS:1002314", "MS:1002746", "MS:1002747", "MS:1002748",
     };
     for (terms) |term| if (std.mem.eql(u8, accession, term)) return true;
     return false;
