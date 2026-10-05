@@ -1,14 +1,23 @@
 #!/usr/bin/env python3
-"""Injects one defect at a time into a reference mzML and checks whether mzdiff flags it.
+"""Injects one defect at a time into a reference mzML and checks that mzdiff reports it.
 
 usage: ./mutate.py MZDIFF REFERENCE.mzML [CASE...]
 
-Written for the PRM fixture (PXD006618/1fmol_HSP90_SILpepmix_PRM.mzML, TRFP output: scans 1..2103,
-one base peak chromatogram). Expected misses: bad_index_offset, bad_checksum, index_attr (mzValidate
-checks those), text_tab (XML turns a tab in an attribute into a space). serial_space shows only through the
-shifted index offset, since values are trimmed. Every other case must be CAUGHT.
+Each case names the key of the critical or major class it must raise, `exit 2` when the file must
+fail to read, or nothing when B must compare the same (a non-defect, or a defect mzValidate owns).
+An edit that shifts bytes also breaks the index offset; that `indexListOffset` class is ignored
+unless the case is about the trailer. A case whose structure the reference lacks is skipped.
+The PRM fixture (PXD006618/1fmol_HSP90_SILpepmix_PRM.mzML) has every single-precursor structure;
+an MS3 reference with two precursors per spectrum (PXD070648) has the multi-precursor ones.
+
+Exit status: 0 when every case that ran behaved as expected, 1 otherwise.
 """
 import re, subprocess, sys, os, tempfile
+
+
+class Skip(Exception):
+    """The reference has no structure for this case."""
+
 
 MZDIFF = sys.argv[1]
 REF = sys.argv[2]
@@ -18,7 +27,10 @@ handle, out = tempfile.mkstemp(suffix=".mzML", dir="/var/tmp")
 os.close(handle)
 
 def spectrum_block(t, scan):
-    s = t.index(f'<spectrum id="controllerType=0 controllerNumber=1 scan={scan}"')
+    at = t.find(f'<spectrum id="controllerType=0 controllerNumber=1 scan={scan}"')
+    if at < 0:
+        raise Skip(f"no scan {scan}")
+    s = at
     s = t.rindex("\n", 0, s) + 1
     e = t.index("</spectrum>", s) + len("</spectrum>\n")
     return s, e
@@ -48,7 +60,8 @@ def truncate_before_index(t):
 def first_in_spectrum(t, scan, old, new):
     a0, a1 = spectrum_block(t, scan)
     blk = t[a0:a1]
-    assert old in blk, old
+    if old not in blk:
+        raise Skip(f"scan {scan} has no {old!r}")
     return t[:a0] + blk.replace(old, new, 1) + t[a1:]
 
 def chrom_time_unit(t):
@@ -74,9 +87,6 @@ def sst_coarse(t):
     new = f"{v + 0.09:.1f}"  # off by up to ~5 s, printed with one decimal
     blk = blk[:m.start(1)] + new + blk[m.end(1):]
     return t[:a0] + blk + t[a1:]
-
-def charge_partial(t):  # 2 -> 2.4 would parse as number; use spelled
-    return t
 
 def ic_ref(t):
     return first_in_spectrum(t, 5, 'instrumentConfigurationRef="IC1"', 'instrumentConfigurationRef="IC2"')
@@ -120,38 +130,101 @@ def text_tab(t):
 def value_case(t):
     return first_in_spectrum(t, 5, 'FTMS + c NSI Full ms2', 'ftms + c NSI Full ms2')
 
+def two_precursors(t):
+    i = t.find('<precursorList count="2">')
+    if i < 0:
+        raise Skip("no spectrum with two precursors")
+    return i, t.index("</precursorList>", i)
+
+def swap_values(t, accession):
+    i, e = two_precursors(t)
+    blk = t[i:e]
+    values = re.findall(rf'accession="{accession}" value="([^"]+)"', blk)
+    if len(values) != 2 or values[0] == values[1]:
+        raise Skip(f"the precursors do not hold two different {accession} values")
+    swapped = iter(values[::-1])
+    blk = re.sub(rf'(accession="{accession}" value=")([^"]+)', lambda m: m.group(1) + next(swapped), blk)
+    return t[:i] + blk + t[e:]
+
+def swap_precursor_charge(t):
+    return swap_values(t, "MS:1000041")
+
+def swap_precursor_energy(t):
+    return swap_values(t, "MS:1000045")
+
+def reorder_precursors(t):
+    i, e = two_precursors(t)
+    blk = t[i:e]
+    starts = [m.start() for m in re.finditer(r"[ \t]*<precursor[ >]", blk)]
+    end = blk.rindex("</precursor>") + len("</precursor>")
+    first, second = blk[starts[0]:starts[1]], blk[starts[1]:end]
+    return t[:i] + blk[:starts[0]] + second.rstrip() + "\n" + first.rstrip() + blk[end:] + t[e:]
+
 def empty_spectra(t):
     s = t.index("<spectrum ")
     s = t.rindex("\n", 0, s) + 1
     e = t.index("</spectrumList>")
     return t[:s] + t[e:]
 
-CASES = {
-    "swap_spectra": swap_spectra, "dup_spectrum": dup_spectrum, "drop_spectrum": drop_spectrum,
-    "truncate_mid": truncate_mid, "truncate_after_spectra": truncate_after_spectra,
-    "truncate_before_index": truncate_before_index, "chrom_time_unit": chrom_time_unit,
-    "chrom_type_change": chrom_type_change, "sst_unit_dropped": sst_unit_dropped,
-    "sst_coarse": sst_coarse, "ic_ref": ic_ref, "array_unit": array_unit, "default_len": default_len,
-    "scan_id_format": scan_id_format, "bad_index_offset": bad_index_offset,
-    "bad_checksum": bad_checksum, "index_attr": index_attr, "unit_only_b": unit_only_b,
-    "text_tab": text_tab, "value_case": value_case, "empty_spectra": empty_spectra,
-    "serial_space": serial_leading_zero,
-}
+EXIT2 = "exit 2"
 
-for name, fn in CASES.items():
+# Case name, edit, and what mzdiff must report: a class key, EXIT2, or None for the same.
+CASES = [
+    ("swap_spectra", swap_spectra, "scan"),
+    ("dup_spectrum", dup_spectrum, "scan"),
+    ("drop_spectrum", drop_spectrum, "@id"),
+    ("empty_spectra", empty_spectra, "@id"),
+    ("truncate_mid", truncate_mid, EXIT2),
+    ("truncate_after_spectra", truncate_after_spectra, EXIT2),
+    ("truncate_before_index", truncate_before_index, "indexListOffset"),
+    ("default_len", default_len, EXIT2),
+    ("chrom_time_unit", chrom_time_unit, "array:MS:1000595"),
+    ("chrom_type_change", chrom_type_change, "MS:1000628"),
+    ("sst_unit_dropped", sst_unit_dropped, "MS:1000016"),
+    ("sst_coarse", sst_coarse, "MS:1000016"),
+    ("unit_only_b", unit_only_b, "MS:1000511"),
+    ("value_case", value_case, "MS:1000512"),
+    ("ic_ref", ic_ref, "instrumentConfiguration"),
+    ("array_unit", array_unit, "array:MS:1000515"),
+    ("scan_id_format", scan_id_format, "id"),
+    ("swap_precursor_charge", swap_precursor_charge, "MS:1000041"),
+    ("swap_precursor_energy", swap_precursor_energy, "MS:1000045"),
+    ("reorder_precursors", reorder_precursors, None),
+    # mzValidate checks these; mzdiff must stay quiet about them.
+    ("bad_index_offset", bad_index_offset, None),
+    ("bad_checksum", bad_checksum, None),
+    ("index_attr", index_attr, None),
+    # Not defects: XML turns a tab in an attribute into a space, and values are trimmed.
+    ("text_tab", text_tab, None),
+    ("serial_space", serial_leading_zero, None),
+]
+
+failed = 0
+for name, edit, expect in CASES:
     if ONLY and name not in ONLY:
         continue
     try:
-        m = fn(text)
-    except Exception as e:
-        print(f"{name:24} SETUP FAILED {e!r}")
+        mutated = edit(text)
+    except Skip as reason:
+        print(f"{name:24} skip   {reason}")
         continue
-    open(out, "w", encoding="utf-8").write(m)
-    p = subprocess.run([MZDIFF, "--tsv", REF, out], capture_output=True, text=True)
-    rows = [r.split("\t") for r in p.stdout.splitlines()[1:]]
-    serious = [r for r in rows if r[0] in ("critical", "major")]
-    flag = "CAUGHT" if p.returncode != 0 else "MISSED"
-    print(f"{name:24} exit={p.returncode} {flag}  " + "; ".join(f"{r[0]}:{r[1]}:{r[4]}" for r in serious[:6])
-          + (f"  stderr={p.stderr.strip()[:150]!r}" if p.stderr.strip() else "")
-          + (f"  minor={len(rows) - len(serious)}" if rows else ""))
+    if mutated == text:
+        print(f"{name:24} skip   the edit found nothing to change")
+        continue
+    open(out, "w", encoding="utf-8").write(mutated)
+    run = subprocess.run([MZDIFF, "--tsv", REF, out], capture_output=True, text=True)
+    rows = [r.split("\t") for r in run.stdout.splitlines()[1:]]
+    serious = {r[4] for r in rows if r[0] in ("critical", "major")}
+    if expect != "indexListOffset":
+        serious.discard("indexListOffset")
+    if expect == EXIT2:
+        ok = run.returncode == 2
+    elif expect is None:
+        ok = run.returncode in (0, 1) and not serious
+    else:
+        ok = expect in serious
+    failed += not ok
+    got = f"exit {run.returncode}" if run.returncode == 2 else (", ".join(sorted(serious)) or "same")
+    print(f"{name:24} {'ok    ' if ok else 'FAIL  '} expected {expect or 'same'}; got {got}")
 os.remove(out)
+sys.exit(1 if failed else 0)
