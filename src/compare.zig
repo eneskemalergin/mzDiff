@@ -995,6 +995,20 @@ test "[unit] - [values]: values equal at 32-bit precision are told apart from re
     try std.testing.expect(sameAt32(0.1853804976, 0.1853804886341095));
 }
 
+test "[edge] - [values]: equal NaNs compare as the same and NaN against a number differs" {
+    const nan = makeFact("spectrum", "MS:1000285", "", "NaN", "", 0);
+    const also_nan = makeFact("spectrum", "MS:1000285", "", "nan", "", 0);
+    const number = makeFact("spectrum", "MS:1000285", "", "15869.6875", "", 0);
+    try std.testing.expectEqual(Verdict.same, compareValues(1, nan, also_nan));
+    try std.testing.expectEqual(Verdict.different, compareValues(1, nan, number));
+    // Opposite signs, so the arrays differ as bytes and the NaN check itself decides.
+    const a = [_]f64{ std.math.nan(f64), 1 };
+    const b = [_]f64{ -std.math.nan(f64), 1 };
+    const c = [_]f64{ 1, 1 };
+    try std.testing.expectEqual(@as(?usize, null), firstMismatch(.{ .float64 = &a }, .{ .float64 = &b }, 0).exact);
+    try std.testing.expectEqual(@as(?usize, 0), firstMismatch(.{ .float64 = &a }, .{ .float64 = &c }, 0).beyond);
+}
+
 test "[unit] - [facts]: facts compare by value whatever the spelling and order" {
     const allocator = std.testing.allocator;
     var rules = Rules.init(allocator);
