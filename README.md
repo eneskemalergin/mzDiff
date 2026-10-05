@@ -69,7 +69,7 @@ controllerType=0 controllerNumber=1 scan=5
 - the filters kept in the address (`diff.html#q=isolation&hide=minor&layout=unified`), so a link opens the same view;
 - light and dark themes from the system setting.
 
-Every value from the files is escaped, so a hostile mzML cannot put markup or script into the page, and the script only hides and shows. The page is built in a bounded buffer like the text view: past 500 records (`--limit N`) or 16 MB it becomes a page that says how large the view would be and how to narrow it. On the PRM pair against mzdata it costs no time over `--list` (106 ms against 105 ms, zebrac).
+Every value from the files is escaped, so a hostile mzML cannot put markup or script into the page, and the script only hides and shows. A Content-Security-Policy, built from the SHA-256 digests of the page's own style and script, lets the browser run nothing else and fetch nothing at all, so even an edited copy of the page cannot run injected script. The page is built in a bounded buffer like the text view: past 500 records (`--limit N`) or 16 MB it becomes a page that says how large the view would be and how to narrow it. On the PRM pair against mzdata it costs no time over `--list` (106 ms against 105 ms, zebrac).
 
 Watching how two tools write the same file:
 
@@ -129,6 +129,13 @@ Differences that remain but carry no meaning are kept as **minor**:
 - `files/`: the JSON report per file, and any mzdiff stderr.
 
 With `-b BASELINE` (an earlier run's directory), it also writes `changes.tsv`: per file, the status change and every class that is new, gone, or hits more or fewer records. It exits 1 when a critical or major class is new or grown, so a converter change can be checked against the last run in one command: `tools/corpus.sh -o /var/tmp/after -b /var/tmp/before`.
+
+## Safety
+
+The input files are untrusted. Besides reading them through zmz's bounded parser:
+
+- Text, TSV, and HTML output show control characters (C0, DEL, C1) and Unicode bidirectional overrides from the files as visible escapes (`\u{009b}`, `\u{202e}`), so a value cannot rewrite your terminal or make text display in another order than it reads. JSON carries the exact values, escaped as JSON.
+- Pairing holds at most 1,024 waiting spectra or 64 MiB per side, whichever comes first; the strings a reader shares between records are capped at 8 MB; the text view and the page refuse past their caps. However different or large two files are, memory stays bounded.
 
 ## Speed and memory
 
