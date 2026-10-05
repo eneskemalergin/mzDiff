@@ -20,11 +20,14 @@ const zmz = @import("zmz");
 const mzml = zmz.mzml;
 const model = mzml.model;
 
-const Rules = @import("rules.zig").Rules;
-const Severity = @import("rules.zig").Severity;
 const compare = @import("compare.zig");
-const Report = compare.Report;
+const rules_mod = @import("rules.zig");
+
 const Fact = compare.Fact;
+const Kind = compare.Kind;
+const Report = compare.Report;
+const Rules = rules_mod.Rules;
+const Severity = rules_mod.Severity;
 
 const USAGE =
     \\usage: mzdiff [options] A.mzML B.mzML
@@ -153,10 +156,10 @@ const Side = struct {
     failure: ?anyerror = null,
     spectra: usize = 0,
     chromatograms: usize = 0,
-    /// Each instrument configuration's component facts by id, for the scans that refer to it.
+    // Each instrument configuration's component facts by id, for the scans that refer to it.
     configurations: std.StringHashMapUnmanaged([]const Fact) = .empty,
     default_configuration: ?[]const u8 = null,
-    /// What is wrong with the indexed wrapper's tail, or null.
+    // What is wrong with the indexed wrapper's tail, or null.
     trailer: ?[]const u8 = null,
     configuration_arena: std.heap.ArenaAllocator = undefined,
 
@@ -248,7 +251,7 @@ const Item = struct {
     kind: model.Kind,
     id: []const u8,
     scan: ?u64,
-    /// The chromatogram type term (TIC, base peak, SRM, ...), or "" without one.
+    // The chromatogram type term (TIC, base peak, SRM, ...), or "" without one.
     type: []const u8,
     facts: []Fact,
     elements: []const compare.Element,
@@ -256,7 +259,7 @@ const Item = struct {
     arena: *std.heap.ArenaAllocator,
     owner: *Side,
     used: bool = false,
-    /// Pairing by scan number, this spectrum has none, or one not above the previous spectrum's.
+    // Pairing by scan number, this spectrum has none, or one not above the previous spectrum's.
     out_of_order: bool = false,
 
     fn free(self: *const Item, allocator: std.mem.Allocator) void {
@@ -301,13 +304,20 @@ fn makeItem(side: *Side, record: model.Record) !Item {
     const arena = arena_state.allocator();
     var facts: std.ArrayList(Fact) = .empty;
     var elements: std.ArrayList(compare.Element) = .empty;
-    const collector: compare.Collector = .{ .arena = arena, .rules = rules, .facts = &facts, .elements = &elements, .groups = header.groups };
+    const collector: compare.Collector = .{
+        .arena = arena,
+        .rules = rules,
+        .facts = &facts,
+        .elements = &elements,
+        .groups = header.groups,
+    };
     try collector.add(record.node, "", compare.NO_PARENT);
     // Facts borrow from the reader's record; copy them before it moves on.
     var type_key: []const u8 = "";
     for (facts.items) |*fact| {
         fact.* = try compare.ownFact(arena, fact.*);
-        if (record.node.kind == .chromatogram and type_key.len == 0 and std.mem.eql(u8, fact.path, "chromatogram") and rules.isA(fact.key, "MS:1000626"))
+        const on_chromatogram = record.node.kind == .chromatogram and std.mem.eql(u8, fact.path, "chromatogram");
+        if (on_chromatogram and type_key.len == 0 and rules.isA(fact.key, "MS:1000626"))
             type_key = fact.key;
     }
     for (elements.items) |*element| element.path = try arena.dupe(u8, element.path);
@@ -369,7 +379,8 @@ fn checkTrailer(file: std.Io.File, io: std.Io) !?[]const u8 {
     const tail = tail_buffer[0..try file.readPositionalAll(io, tail_buffer[0..@intCast(size - start)], start)];
     const trimmed = std.mem.trimEnd(u8, tail, " \t\r\n");
     const offset_text = between(trimmed, "<indexListOffset>", "</indexListOffset>");
-    if (!std.mem.endsWith(u8, trimmed, "</indexedmzML>") or offset_text == null or between(trimmed, "<fileChecksum>", "</fileChecksum>") == null)
+    const checksum = between(trimmed, "<fileChecksum>", "</fileChecksum>");
+    if (!std.mem.endsWith(u8, trimmed, "</indexedmzML>") or offset_text == null or checksum == null)
         return "no index trailer";
     const offset = std.fmt.parseInt(u64, std.mem.trim(u8, offset_text.?, " \t\r\n"), 10) catch return "offset is not a number";
     // TRFP's offsets point at the indentation before the element, which readers accept.
@@ -436,7 +447,7 @@ const Stream = struct {
         };
     }
 
-    /// Hands over the current item; the caller frees it.
+    // Hands over the current item; the caller frees it.
     fn take(self: *Stream) Item {
         const item = self.current.?;
         self.current = null;
@@ -467,7 +478,16 @@ fn run(allocator: std.mem.Allocator, io: std.Io, out: *std.Io.Writer, rules: *Ru
     report.ppm = options.ppm;
     // A broken index trailer is reported whether or not the header is compared.
     if (side_a.trailer != null or side_b.trailer != null)
-        try report.add(null, .value, "indexedmzML", "indexListOffset", "index trailer", "header", side_a.trailer orelse "ok", side_b.trailer orelse "ok");
+        try report.add(
+            null,
+            .value,
+            "indexedmzML",
+            "indexListOffset",
+            "index trailer",
+            "header",
+            side_a.trailer orelse "ok",
+            side_b.trailer orelse "ok",
+        );
 
     if (options.header) {
         var arena_state = std.heap.ArenaAllocator.init(allocator);
@@ -566,7 +586,16 @@ fn run(allocator: std.mem.Allocator, io: std.Io, out: *std.Io.Writer, rules: *Ru
                     report.record += 1;
                     const in_a = entry[2] == .record_missing;
                     checkOrder(&report, item, in_a) catch |err| break :consume err;
-                    report.add(.critical, entry[2], "spectrum", "@id", "spectrum", item.id, if (in_a) item.id else "", if (in_a) "" else item.id) catch |err| break :consume err;
+                    report.add(
+                        .critical,
+                        entry[2],
+                        "spectrum",
+                        "@id",
+                        "spectrum",
+                        item.id,
+                        if (in_a) item.id else "",
+                        if (in_a) "" else item.id,
+                    ) catch |err| break :consume err;
                 }
                 stream.advance();
             }
@@ -617,7 +646,10 @@ fn run(allocator: std.mem.Allocator, io: std.Io, out: *std.Io.Writer, rules: *Ru
     if (options.tsv) {
         try out.writeAll("severity\tkind\trecords\tpath\tkey\tname\texample\ta\tb\n");
         for (classes) |class| {
-            const example: compare.Example = if (class.examples.items.len != 0) class.examples.items[0] else .{ .id = "", .a = "", .b = "" };
+            const example: compare.Example = if (class.examples.items.len != 0)
+                class.examples.items[0]
+            else
+                .{ .id = "", .a = "", .b = "" };
             try out.print("{s}\t{s}\t{d}", .{ @tagName(class.severity), @tagName(class.kind), class.records });
             for ([_][]const u8{ class.path, class.key, class.name, example.id, example.a, example.b }) |field| {
                 try out.writeByte('\t');
@@ -626,12 +658,20 @@ fn run(allocator: std.mem.Allocator, io: std.Io, out: *std.Io.Writer, rules: *Ru
             try out.writeByte('\n');
         }
         // The TSV has no summary lines, so a partial comparison is said on stderr.
-        if (stopped_early) std.debug.print("mzdiff: stopped after {d} paired spectra (--max-spectra); chromatograms not compared\n", .{paired});
+        if (stopped_early) std.debug.print(
+            "mzdiff: stopped after {d} paired spectra (--max-spectra); chromatograms not compared\n",
+            .{paired},
+        );
         return failed;
     }
 
     try out.print("A  {s}  ({s})\nB  {s}  ({s})\n", .{ a_path, a_software, b_path, b_software });
-    try out.print("spectra        A {d}  B {d}  paired {d}{s}\n", .{ a_spectra, b_spectra, paired, if (stopped_early) "  (stopped early)" else "" });
+    try out.print("spectra        A {d}  B {d}  paired {d}{s}\n", .{
+        a_spectra,
+        b_spectra,
+        paired,
+        if (stopped_early) "  (stopped early)" else "",
+    });
     try out.print("chromatograms  A {d}  B {d}\n", .{ a_chromatograms, b_chromatograms });
     try out.print("time           {d:.2} s\n", .{seconds});
     if (classes.len == 0) {
@@ -669,8 +709,6 @@ fn checkOrder(report: *Report, item: Item, in_a: bool) !void {
 fn drain(allocator: std.mem.Allocator, io: std.Io, side: *Side) void {
     while (side.queue.getOne(io)) |item| item.free(allocator) else |_| {}
 }
-
-const Kind = compare.Kind;
 
 // A TSV field with tabs and line breaks escaped, so each class stays one row.
 fn writeField(out: *std.Io.Writer, text: []const u8) !void {
@@ -751,9 +789,11 @@ fn match(list: []Item, x: *const Item, how: Match) ?*Item {
     return null;
 }
 
+// --- Tests ---
+
 test {
     _ = compare;
-    _ = @import("rules.zig");
+    _ = rules_mod;
 }
 
 test "scan numbers come from the native id" {
