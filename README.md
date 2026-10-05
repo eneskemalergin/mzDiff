@@ -7,6 +7,7 @@
 
 <p align="center">
   <img src="https://img.shields.io/badge/zig-0.16.0-F7A41D?style=flat-square&logo=zig&logoColor=white" alt="Zig 0.16.0">
+  <img src="https://img.shields.io/badge/license-MIT-4B9D6E?style=flat-square" alt="MIT">
   <img src="https://img.shields.io/badge/status-development-green?style=flat-square" alt="Status: development">
 </p>
 
@@ -94,4 +95,4 @@ Measured with [zebrac](https://github.com/eneskemalergin/zebrac) 0.6.3 on the st
 
 ## License
 
-Not chosen yet.
+MIT. See [LICENSE](LICENSE).
