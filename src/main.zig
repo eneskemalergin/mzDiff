@@ -623,8 +623,9 @@ fn run(
     };
     defer lister.deinit();
     if (options.mode == .list) report.sink = lister.sink();
-    // A broken index trailer is reported whether or not the header is compared.
-    if (side_a.trailer != null or side_b.trailer != null)
+    // B's broken index trailer is a difference, reported whether or not the header is compared; the
+    // reference's is only worth a warning.
+    if (side_b.trailer) |problem|
         try report.add(
             null,
             .value,
@@ -633,8 +634,9 @@ fn run(
             "index trailer",
             "header",
             side_a.trailer orelse "ok",
-            side_b.trailer orelse "ok",
+            problem,
         );
+    if (side_a.trailer) |problem| std.debug.print("mzdiff: {s}: index trailer: {s}\n", .{ side_a.path, problem });
 
     if (options.header) {
         var arena_state = std.heap.ArenaAllocator.init(allocator);
