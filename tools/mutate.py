@@ -4,9 +4,9 @@
 usage: tools/mutate.py MZDIFF REFERENCE.mzML [CASE...]
 
 Each case names the key of the critical or major class it must raise (`KEY (KIND)` when the kind
-matters too), `exit 2` when the file must fail to read, `minor:KIND` when it must raise that minor kind and nothing more serious (a
-tolerance at work), or nothing when B must compare exactly the same (a non-defect, or a defect
-mzValidate owns).
+matters too), `exit 3` when the file must fail to read, `minor:KIND` when it must raise that minor
+kind and nothing more serious (a tolerance at work), or nothing when B must compare exactly the
+same (a non-defect, or a defect mzValidate owns).
 An edit that shifts bytes also breaks the index offset; that `indexListOffset` class is ignored
 unless the case is about the trailer. A case whose structure the reference lacks is skipped.
 The PRM fixture (PXD006618/1fmol_HSP90_SILpepmix_PRM.mzML) has every single-precursor structure;
@@ -374,19 +374,19 @@ def empty_spectra(t):
     e = t.index("</spectrumList>")
     return t[:s] + t[e:]
 
-EXIT2 = "exit 2"
+UNREADABLE = "exit 3"
 
-# Case name, edit, and what mzdiff must report: a class key, EXIT2, or None for the same.
+# Case name, edit, and what mzdiff must report: a class key, UNREADABLE (the comparison cannot complete), or None for the same.
 CASES = [
     ("swap_spectra", swap_spectra, "order"),
     ("dup_spectrum", dup_spectrum, "@id"),
     ("drop_spectrum", drop_spectrum, "@id"),
     ("drop_many", drop_many, "@id"),
     ("empty_spectra", empty_spectra, "@id"),
-    ("truncate_mid", truncate_mid, EXIT2),
-    ("truncate_after_spectra", truncate_after_spectra, EXIT2),
+    ("truncate_mid", truncate_mid, UNREADABLE),
+    ("truncate_after_spectra", truncate_after_spectra, UNREADABLE),
     ("truncate_before_index", truncate_before_index, "indexListOffset"),
-    ("default_len", default_len, EXIT2),
+    ("default_len", default_len, UNREADABLE),
     ("chrom_time_unit", chrom_time_unit, "array:MS:1000595"),
     ("chrom_type_change", chrom_type_change, "MS:1000628"),
     ("sst_unit_dropped", sst_unit_dropped, "MS:1000016"),
@@ -458,8 +458,8 @@ try:
         serious = {r[4] for r in rows if r[0] in ("critical", "major")}
         kinded = {f"{r[4]} ({r[1]})" for r in rows if r[0] in ("critical", "major")}
         minor = {r[1] for r in rows if r[0] == "minor"}
-        if expect == EXIT2:
-            ok = run.returncode == 2
+        if expect == UNREADABLE:
+            ok = run.returncode == 3
         elif expect is None:
             ok = run.returncode in (0, 1) and not rows
         elif expect.startswith("minor:"):
@@ -469,7 +469,7 @@ try:
         else:
             ok = expect in serious
         failed += not ok
-        got = f"exit {run.returncode}" if run.returncode == 2 else (", ".join(sorted(serious) + [f"minor:{k}" for k in sorted(minor)]) or "same")
+        got = f"exit {run.returncode}" if run.returncode >= 2 else (", ".join(sorted(serious) + [f"minor:{k}" for k in sorted(minor)]) or "same")
         print(f"{name:24} {'ok    ' if ok else 'FAIL  '} expected {expect or 'same'}; got {got}")
 finally:
     os.remove(out)

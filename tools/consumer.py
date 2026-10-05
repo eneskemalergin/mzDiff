@@ -359,8 +359,8 @@ def impact(ok, lost, wrong, shifted):
 
 def mzdiff(args, ref, mzml):
     run = subprocess.run([args.mzdiff, "--json", ref, mzml], capture_output=True, text=True)
-    if run.returncode == 2:
-        return "exit 2", run.stderr.strip().splitlines()[-1][:80] if run.stderr.strip() else ""
+    if run.returncode >= 2:
+        return f"exit {run.returncode}", run.stderr.strip().splitlines()[-1][:80] if run.stderr.strip() else ""
     report = json.loads(run.stdout)
     order = {"critical": 0, "major": 1, "minor": 2}
     classes = [c for c in report["classes"] if c["key"] != "indexListOffset"]

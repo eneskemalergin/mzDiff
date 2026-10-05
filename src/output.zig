@@ -738,11 +738,40 @@ fn writeSummaryLine(out: *std.Io.Writer, style: Style, outcome: Outcome) !void {
     });
 }
 
+pub const VERSION = @import("build_options").version;
+
+/// Why a run could not complete, for stderr and for JSON. `side` and `path` are null when the
+/// failure is not one file's (out of memory, a closed output).
+pub const Failure = struct {
+    side: ?enum { a, b } = null,
+    path: ?[]const u8 = null,
+    /// The error's name, stable for scripts (FileNotFound, InvalidXml, ...).
+    name: []const u8 = "",
+    /// A sentence for people: the reader's diagnostic when it gave one.
+    message: []const u8 = "",
+};
+
+/// The error object a JSON run prints when it cannot complete: the whole document for the report
+/// and the summary, the last line for --list.
+pub fn writeErrorJson(out: *std.Io.Writer, failure: Failure) !void {
+    try out.writeAll("{\"type\": \"error\", \"schema_version\": 1, ");
+    try out.print("\"tool\": {{\"name\": \"mzdiff\", \"version\": \"{s}\"}}, \"error\": ", .{VERSION});
+    try writeJsonString(out, failure.name);
+    try out.writeAll(", \"side\": ");
+    if (failure.side) |side| try out.print("\"{s}\"", .{@tagName(side)}) else try out.writeAll("null");
+    try out.writeAll(", \"path\": ");
+    if (failure.path) |path| try writeJsonString(out, path) else try out.writeAll("null");
+    try out.writeAll(", \"message\": ");
+    try writeJsonString(out, failure.message);
+    try out.writeAll("}\n");
+}
+
 // The outcome's fields, without the enclosing braces, each line starting with `indent` (an empty
 // indent writes one line).
 fn writeOutcomeJson(out: *std.Io.Writer, outcome: Outcome, indent: []const u8) !void {
     const sep = if (indent.len == 0) ", " else ",\n";
     try out.print("{s}\"schema_version\": 1{s}", .{ indent, sep });
+    try out.print("{s}\"tool\": {{\"name\": \"mzdiff\", \"version\": \"{s}\"}}{s}", .{ indent, VERSION, sep });
     inline for (.{ .{ "a", outcome.a }, .{ "b", outcome.b } }) |entry| {
         try out.print("{s}\"{s}\": {{\"path\": ", .{ indent, entry[0] });
         try writeJsonString(out, entry[1].path);

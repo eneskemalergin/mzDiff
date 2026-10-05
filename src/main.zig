@@ -3,8 +3,8 @@
 //! A is the reference (usually TRFP's mzML next to the .raw), B the output under test. Spectra
 //! pair by native id in any vendor's format (by scan number when the formats differ, by position
 //! when neither works) through a bounded join that needs no order, so a spectrum missing or moved
-//! on one side is reported once and the pairs around it stay correct. Chromatograms pair by
-//! type and id, then type, then id. The headers are compared too, without the parts that differ
+//! on one side is reported once and the pairs around it stay correct. Chromatograms pair by id
+//! through the same join, then the leftovers by type. The headers are compared too, without the parts that differ
 //! between tools by design (cvList, softwareList, dataProcessingList, ids, file locations), and
 //! an indexed file's trailer must be complete.
 //!
@@ -12,8 +12,8 @@
 //! minor, or ignored. Output lists the classes, most severe and most frequent first, with
 //! examples. Each file is read and decoded on its own thread, so the two inputs are parsed at
 //! the same time; memory stays bounded by the queue depth. Exit status: 0 when nothing at or
-//! above `--fail-on` (default major) differs, 1 when something does, 2 for a usage error or a
-//! file that cannot be read.
+//! above `--fail-on` (default major) differs, 1 when something does, 2 for a usage error, and 3
+//! when the comparison cannot complete (a file cannot be read), as for mzValidate.
 
 const std = @import("std");
 const zmz = @import("zmz");
@@ -68,10 +68,26 @@ const USAGE =
     \\  --fail-on LEVEL    exit 1 at this severity or above (default major)
     \\
     \\  -h, --help         this text
+    \\  --version          the version
     \\
-    \\A KEY is a PSI-MS accession (MS:1000016), user:NAME, @attribute, array:ACCESSION, or a
-    \\named check: id, order, indexed, indexListOffset, instrumentConfiguration, element.
-    \\Exit status: 0 same or tolerated, 1 differs, 2 usage error or unreadable file.
+    \\An option's value follows it (--limit 10) or joins it (--limit=10); -- ends the options.
+    \\A KEY is a PSI-MS accession (MS:1000016), user:NAME, @attribute, array:ACCESSION, a named
+    \\check (id, order, precursorOrder, indexed, indexListOffset, instrumentConfiguration,
+    \\element, array:peaks), or a form check (form:integer, form:paramGroup, form:numpress).
+    \\
+    \\Exit status:
+    \\  0  same, or tolerated: nothing at or above --fail-on differs
+    \\  1  differs
+    \\  2  usage error
+    \\  3  the comparison could not complete: a file is missing, unreadable, or cut short
+    \\With --json, a run that cannot complete still prints JSON: an object with "type": "error".
+    \\
+    \\Examples:
+    \\  mzdiff trfp.mzML tool.mzML                          the report
+    \\  mzdiff --summary --json trfp.mzML tool.mzML         the verdict and counts, for scripts
+    \\  mzdiff --list --key MS:1000512 trfp.mzML tool.mzML  every filter string that differs
+    \\  mzdiff --view --html trfp.mzML tool.mzML > d.html   the differing records as a page
+    \\  mzdiff -q trfp.mzML tool.mzML && echo same          the exit status alone
     \\
 ;
 
@@ -109,6 +125,10 @@ pub fn main(init: std.process.Init) u8 {
             std.Io.File.stdout().writeStreamingAll(io, USAGE) catch {};
             return 0;
         },
+        error.Version => {
+            std.Io.File.stdout().writeStreamingAll(io, "mzdiff " ++ output.VERSION ++ "\n") catch {};
+            return 0;
+        },
         else => {
             std.debug.print(
                 "mzdiff: {s}\nmzdiff: run 'mzdiff --help' for the options\n",
@@ -123,18 +143,55 @@ pub fn main(init: std.process.Init) u8 {
     var out_buffer: [64 * 1024]u8 = undefined;
     var stdout = std.Io.File.stdout().writer(io, &out_buffer);
     const out = &stdout.interface;
-    const status = run(allocator, io, out, &rules, options, style, interactive) catch |err| {
-        // A JSON Lines stream that stops early says so, so its reader cannot mistake it for complete.
-        if (options.mode == .list and options.format == .json)
-            out.print("{{\"type\": \"error\", \"error\": \"{s}\"}}\n", .{@errorName(err)}) catch {};
-        out.flush() catch {};
+    var failure: output.Failure = .{};
+    const status = run(allocator, arena, io, out, &rules, options, style, interactive, &failure) catch |err| {
         // A reader that closed the pipe (`| head`) has what it wanted.
         if (err == error.WriteFailed and brokenPipe(&stdout)) return 0;
-        std.debug.print("mzdiff: error.{s}\n", .{@errorName(err)});
-        return 2;
+        if (failure.name.len == 0) failure = .{ .name = @errorName(err), .message = describe(err) };
+        // JSON output says it is incomplete in JSON, so a pipeline never parses an empty or cut
+        // stream as a result: the whole document for the report and summary, the last line for
+        // --list.
+        if (options.format == .json) output.writeErrorJson(out, failure) catch {};
+        out.flush() catch {};
+        if (failure.side) |side|
+            std.debug.print("mzdiff: {s} {s}: {s}\n", .{ sideName(side), failure.path.?, failure.message })
+        else
+            std.debug.print("mzdiff: {s}\n", .{failure.message});
+        return 3;
     };
-    out.flush() catch return if (brokenPipe(&stdout)) 0 else 2;
+    out.flush() catch return if (brokenPipe(&stdout)) 0 else 3;
     return if (status == .differs) 1 else 0;
+}
+
+fn sideName(side: @FieldType(output.Failure, "side")) []const u8 {
+    return switch (side.?) {
+        .a => "A",
+        .b => "B",
+    };
+}
+
+// A sentence for an error that came without a diagnostic.
+fn describe(err: anyerror) []const u8 {
+    return switch (err) {
+        error.FileNotFound => "no such file",
+        error.AccessDenied, error.PermissionDenied => "permission denied",
+        error.IsDir => "is a directory",
+        error.OutOfMemory => "out of memory",
+        error.WriteFailed => "cannot write the output",
+        else => @errorName(err),
+    };
+}
+
+// Files a side's failure: its path, the error, and the reader's diagnostic when there is one,
+// copied out of the side, which `run` frees.
+fn blame(failure: *output.Failure, arena: std.mem.Allocator, side: @FieldType(output.Failure, "side"), path: []const u8, reason: []const u8, err: anyerror) anyerror {
+    failure.* = .{
+        .side = side,
+        .path = path,
+        .name = @errorName(err),
+        .message = if (reason.len != 0) arena.dupe(u8, reason) catch describe(err) else describe(err),
+    };
+    return err;
 }
 
 // The side-by-side width: COLUMNS when the shell exports it, else 160.
@@ -168,6 +225,8 @@ const Parser = struct {
     i: usize = 1,
     arena: std.mem.Allocator,
     problem: *[]const u8,
+    // The value joined to the current option (--limit=10), until taken.
+    joined: ?[]const u8 = null,
 
     fn fail(self: *Parser, comptime fmt: []const u8, values: anytype) error{Usage} {
         self.problem.* = std.fmt.allocPrint(self.arena, fmt, values) catch "invalid arguments";
@@ -175,6 +234,10 @@ const Parser = struct {
     }
 
     fn value(self: *Parser, flag: []const u8) error{Usage}![]const u8 {
+        if (self.joined) |text| {
+            self.joined = null;
+            return text;
+        }
         self.i += 1;
         if (self.i == self.args.len) return self.fail("{s} needs a value", .{flag});
         return self.args[self.i];
@@ -208,9 +271,27 @@ fn parse(arena: std.mem.Allocator, args: []const []const u8, rules: *Rules, prob
     var list_flag: ?[]const u8 = null;
     var view_flag: ?[]const u8 = null;
     var examples_set = false;
+    var options_ended = false;
     while (p.i < args.len) : (p.i += 1) {
-        const arg = args[p.i];
+        var arg = args[p.i];
+        if (!options_ended and std.mem.eql(u8, arg, "--")) {
+            options_ended = true;
+            continue;
+        }
+        if (options_ended or !std.mem.startsWith(u8, arg, "-") or arg.len == 1) {
+            if (file_count == 2) return p.fail("one file too many: '{s}' (A and B are already given)", .{arg});
+            files[file_count] = arg;
+            file_count += 1;
+            continue;
+        }
+        // --option=VALUE is --option VALUE.
+        if (std.mem.startsWith(u8, arg, "--")) if (std.mem.indexOfScalar(u8, arg, '=')) |eq| {
+            p.joined = arg[eq + 1 ..];
+            arg = arg[0..eq];
+        };
+        defer p.joined = null;
         if (std.mem.eql(u8, arg, "-h") or std.mem.eql(u8, arg, "--help")) return error.Help;
+        if (std.mem.eql(u8, arg, "--version")) return error.Version;
         if (modeOf(arg)) |mode| {
             if (mode_flag) |earlier| return p.fail("{s} and {s} are both modes; pick one", .{ earlier, arg });
             mode_flag = arg;
@@ -260,13 +341,10 @@ fn parse(arena: std.mem.Allocator, args: []const []const u8, rules: *Rules, prob
             const text = try p.value(arg);
             const eq = std.mem.lastIndexOfScalar(u8, text, '=') orelse return p.fail("--set takes KEY=LEVEL, not '{s}'", .{text});
             try rules.override(text[0..eq], try p.level(arg, text[eq + 1 ..], true));
-        } else if (std.mem.startsWith(u8, arg, "-") and arg.len > 1) {
-            return p.fail("unknown option '{s}'", .{arg});
         } else {
-            if (file_count == 2) return p.fail("one file too many: '{s}' (A and B are already given)", .{arg});
-            files[file_count] = arg;
-            file_count += 1;
+            return p.fail("unknown option '{s}'", .{arg});
         }
+        if (p.joined != null) return p.fail("{s} takes no value", .{arg});
     }
     if (file_count != 2) return p.fail("give two files, A (the reference) and B (the output under test)", .{});
     switch (options.mode) {
@@ -319,20 +397,22 @@ const HEADER_SKIP = [_]model.Kind{
 
 fn run(
     allocator: std.mem.Allocator,
+    arena_outer: std.mem.Allocator,
     io: std.Io,
     out: *std.Io.Writer,
     rules: *Rules,
     options: Options,
     style: output.Style,
     interactive: bool,
+    failure: *output.Failure,
 ) !output.Status {
     const sides = try allocator.create([2]read.Side);
     defer allocator.destroy(sides);
     const side_a = &sides[0];
     const side_b = &sides[1];
-    try side_a.open(allocator, io, options.a, rules);
+    side_a.open(allocator, io, options.a, rules) catch |err| return blame(failure, arena_outer, .a, options.a, side_a.reason, err);
     defer side_a.close(io);
-    try side_b.open(allocator, io, options.b, rules);
+    side_b.open(allocator, io, options.b, rules) catch |err| return blame(failure, arena_outer, .b, options.b, side_b.reason, err);
     defer side_b.close(io);
 
     var report = Report.init(allocator, rules, options.examples);
@@ -369,7 +449,7 @@ fn run(
             side_a.trailer orelse "ok",
             problem,
         );
-    if (side_a.trailer) |problem| std.debug.print("mzdiff: {s}: index trailer: {s}\n", .{ side_a.path, problem });
+    if (side_a.trailer) |problem| std.debug.print("mzdiff: A {s}: index trailer: {s}\n", .{ side_a.path, problem });
 
     if (options.header) {
         var arena_state = std.heap.ArenaAllocator.init(allocator);
@@ -411,13 +491,13 @@ fn run(
     future_a.await(io);
     future_b.await(io);
     const counts = try consumed;
-    if (side_a.failure) |err| return err;
-    if (side_b.failure) |err| return err;
+    if (side_a.failure) |err| return blame(failure, arena_outer, .a, options.a, side_a.reason, err);
+    if (side_b.failure) |err| return blame(failure, arena_outer, .b, options.b, side_b.reason, err);
 
     const elapsed = std.Io.Timestamp.now(io, .awake).toNanoseconds() - started.toNanoseconds();
     // Nothing to pair is never a pass worth trusting.
     if (side_a.spectra == 0 and side_a.chromatograms == 0) std.debug.print(
-        "mzdiff: {s} holds no spectra or chromatograms\n",
+        "mzdiff: A {s}: holds no spectra or chromatograms\n",
         .{side_a.path},
     );
 
@@ -507,4 +587,23 @@ test "[unit] - [arguments]: each mode, format, and selection combines only where
     try std.testing.expectEqual(output.Mode.list, options.mode);
     try std.testing.expectEqual(output.Format.json, options.format);
     try std.testing.expectEqualStrings("MS:1000016", options.selection.keys[0]);
+}
+
+test "[unit] - [arguments]: a joined value, --, --version, and a value given to a flag without one" {
+    var arena_state = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+    var rules = Rules.init(std.testing.allocator);
+    defer rules.deinit();
+    var problem: []const u8 = "";
+    const joined = try parse(arena, &.{ "mzdiff", "--list", "--limit=7", "--fail-on=minor", "a.mzML", "b.mzML" }, &rules, &problem);
+    try std.testing.expectEqual(@as(?usize, 7), joined.selection.limit);
+    try std.testing.expectEqual(Severity.minor, joined.fail_on);
+    const ended = try parse(arena, &.{ "mzdiff", "--", "-a.mzML", "--b.mzML" }, &rules, &problem);
+    try std.testing.expectEqualStrings("-a.mzML", ended.a);
+    try std.testing.expectEqualStrings("--b.mzML", ended.b);
+    try std.testing.expectError(error.Version, parse(arena, &.{ "mzdiff", "--version" }, &rules, &problem));
+    try std.testing.expectError(error.Usage, parse(arena, &.{ "mzdiff", "--quiet=yes", "a", "b" }, &rules, &problem));
+    try std.testing.expectEqualStrings("--quiet takes no value", problem);
+    try std.testing.expectError(error.Usage, parse(arena, &.{ "mzdiff", "--limit=", "a", "b" }, &rules, &problem));
 }

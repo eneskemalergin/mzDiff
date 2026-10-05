@@ -40,6 +40,9 @@ pub const Side = struct {
     allocator: std.mem.Allocator = undefined,
     io: std.Io = undefined,
     failure: ?anyerror = null,
+    // The reader's diagnostic for the failure, when it gave one; set before `failure`.
+    reason_buffer: [512]u8 = undefined,
+    reason: []const u8 = "",
     spectra: usize = 0,
     chromatograms: usize = 0,
     // Each instrument configuration's component facts by id, for the scans that refer to it.
@@ -54,10 +57,13 @@ pub const Side = struct {
     pub fn open(self: *Side, allocator: std.mem.Allocator, io: std.Io, path: []const u8, rules: *const Rules) !void {
         self.path = path;
         self.failure = null;
+        self.reason = "";
         self.spectra = 0;
         self.chromatograms = 0;
         self.file = try std.Io.Dir.cwd().openFile(io, path, .{});
         errdefer self.file.close(io);
+        // A directory opens like a file on Linux and fails only at the first read, obscurely.
+        if ((try self.file.stat(io)).kind == .directory) return error.IsDir;
         self.input = self.file.reader(io, &self.buffer);
         self.reader = try mzml.StreamReader.init(allocator, &self.input.interface, .{});
         errdefer self.reader.deinit();
@@ -128,8 +134,13 @@ pub const Side = struct {
         self.file.close(io);
     }
 
+    // Keeps the reader's diagnostic for `err`, cut to the buffer, for main to report.
     fn explain(self: *Side, err: anyerror) anyerror {
-        if (self.reader.diagnostic()) |diagnostic| std.debug.print("mzdiff: {s}: {f}\n", .{ self.path, diagnostic });
+        if (self.reader.diagnostic()) |diagnostic| {
+            var writer = std.Io.Writer.fixed(&self.reason_buffer);
+            writer.print("{f}", .{diagnostic}) catch {};
+            self.reason = writer.buffered();
+        }
         return err;
     }
 };
