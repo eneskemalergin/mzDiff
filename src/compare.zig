@@ -643,10 +643,14 @@ fn diffGroup(report: *Report, id: []const u8, a: []const Fact, b: []const Fact) 
 }
 
 // A unit on one side only leaves the value as it was. One B adds is minor (mzValidate judges
-// whether the term allows it); one B drops costs readers the unit, never more than major.
+// whether the term allows it); one B drops costs readers the unit: never more than major, except
+// for a time, which means nothing without one.
 fn oneSidedUnit(report: *Report, key: []const u8, unit_a: []const u8) Severity {
     if (unit_a.len == 0) return .minor;
     const level = report.rules.severity(key);
+    // A time without its unit could be seconds or minutes, and readers refuse it or misread it
+    // sixtyfold; any other unit is implied by the term, so dropping it costs at most major.
+    if (std.mem.eql(u8, unit_a, MINUTE) or std.mem.eql(u8, unit_a, SECOND)) return level;
     return if (level == .critical) .major else level;
 }
 
@@ -1461,22 +1465,26 @@ test "[edge] - [values]: seconds read as minutes keep the precision they were pr
     try std.testing.expect(compareValues(1, a, c) != .different);
 }
 
-test "[unit] - [facts]: a unit b drops is at most major and one b adds is minor" {
+test "[unit] - [facts]: a unit b drops is at most major, except a time's, and one b adds is minor" {
     const allocator = std.testing.allocator;
     var rules = Rules.init(allocator);
     defer rules.deinit();
-    // Scan start time is critical, so a dropped unit shows the cap; the value itself matches.
-    const cases = [_]struct { a: []const u8, b: []const u8, severity: Severity }{
-        .{ .a = MINUTE, .b = "", .severity = .major },
-        .{ .a = "", .b = MINUTE, .severity = .minor },
-        // In seconds on one side only, the printed values still match.
-        .{ .a = SECOND, .b = "", .severity = .major },
+    const MZ = "MS:1000040";
+    // Both keys are critical; the values match, so only the unit differs.
+    const cases = [_]struct { key: []const u8, a: []const u8, b: []const u8, severity: Severity }{
+        // m/z is the selected ion's only unit: dropping it shows the cap.
+        .{ .key = "MS:1000744", .a = MZ, .b = "", .severity = .major },
+        .{ .key = "MS:1000744", .a = "", .b = MZ, .severity = .minor },
+        // A time without its unit could be seconds or minutes.
+        .{ .key = "MS:1000016", .a = MINUTE, .b = "", .severity = .critical },
+        .{ .key = "MS:1000016", .a = SECOND, .b = "", .severity = .critical },
+        .{ .key = "MS:1000016", .a = "", .b = MINUTE, .severity = .minor },
     };
     for (cases) |case| {
         var report = Report.init(allocator, &rules, 3);
         defer report.deinit();
-        var a = [_]Fact{makeFact("spectrum/scan", "MS:1000016", "", "1.5", case.a, 0)};
-        var b = [_]Fact{makeFact("spectrum/scan", "MS:1000016", "", "1.5", case.b, 0)};
+        var a = [_]Fact{makeFact("spectrum/scan", case.key, "", "1.5", case.a, 0)};
+        var b = [_]Fact{makeFact("spectrum/scan", case.key, "", "1.5", case.b, 0)};
         try diffFacts(&report, "scan=1", &a, &b);
         const classes = try report.sorted(allocator);
         defer allocator.free(classes);
