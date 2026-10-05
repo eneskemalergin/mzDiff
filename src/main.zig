@@ -754,7 +754,7 @@ fn run(
     defer viewer.deinit();
     viewer.layout = options.layout;
     viewer.width = options.width orelse 160;
-    if (options.selection.limit) |limit| viewer.records = limit;
+    if (options.selection.limit) |limit| viewer.tally.records = limit;
     if (options.mode == .view) report.sink = viewer.sink();
     // B's broken index trailer is a difference, reported whether or not the header is compared; the
     // reference's is only worth a warning.
