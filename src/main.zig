@@ -38,6 +38,7 @@ const USAGE =
     \\What to show (one; the report by default):
     \\  --summary          the verdict and its counts, on one line
     \\  --list             every difference, one per line, in the order found
+    \\  --view             the differing records as a git-style diff; refuses when too large
     \\  -q, --quiet        nothing; the exit status is the answer
     \\
     \\How to show it (text by default):
@@ -48,8 +49,9 @@ const USAGE =
     \\Narrow what is shown (never the verdict):
     \\  --severity LEVEL   critical, major, or minor and above (default minor)
     \\  --key KEY          only this key; repeat for more
-    \\  --record ID        only this record, by its native id (--list); repeat for more
-    \\  --limit N          print at most N differences (--list)
+    \\  --record ID        only this record, by its native id (--list, --view); repeat for more
+    \\  --limit N          print at most N differences (--list), or view at most N records
+    \\                     (--view, default 40)
     \\  --examples N       examples per class in the report (default 3)
     \\
     \\Compare:
@@ -244,9 +246,10 @@ fn parse(arena: std.mem.Allocator, args: []const []const u8, rules: *Rules, prob
     switch (options.mode) {
         .quiet => if (format_flag) |flag| return p.fail("--quiet prints nothing, so {s} does not apply", .{flag}),
         .summary => if (selection_flag) |flag| return p.fail("--summary counts everything, so {s} does not apply", .{flag}),
+        .view => if (format_flag) |flag| return p.fail("--view is for people; for programs, use --list {s}", .{flag}),
         .report, .list => {},
     }
-    if (options.mode != .list) if (list_flag) |flag| return p.fail("{s} works with --list", .{flag});
+    if (options.mode != .list and options.mode != .view) if (list_flag) |flag| return p.fail("{s} works with --list or --view", .{flag});
     if (options.mode != .report and examples_set) return p.fail("--examples applies to the report only", .{});
     options.a = files[0];
     options.b = files[1];
@@ -258,6 +261,7 @@ fn parse(arena: std.mem.Allocator, args: []const []const u8, rules: *Rules, prob
 fn modeOf(arg: []const u8) ?output.Mode {
     if (std.mem.eql(u8, arg, "--summary")) return .summary;
     if (std.mem.eql(u8, arg, "--list")) return .list;
+    if (std.mem.eql(u8, arg, "--view")) return .view;
     if (std.mem.eql(u8, arg, "-q") or std.mem.eql(u8, arg, "--quiet")) return .quiet;
     return null;
 }
@@ -724,6 +728,10 @@ fn run(
     };
     defer lister.deinit();
     if (options.mode == .list) report.sink = lister.sink();
+    var viewer = output.Viewer.init(allocator, out, style, options.selection);
+    defer viewer.deinit();
+    if (options.selection.limit) |limit| viewer.records = limit;
+    if (options.mode == .view) report.sink = viewer.sink();
     // B's broken index trailer is a difference, reported whether or not the header is compared; the
     // reference's is only worth a warning.
     if (side_b.trailer) |problem|
@@ -912,6 +920,7 @@ fn run(
         .report => try output.writeReport(out, options.format, style, outcome, classes, options.selection),
         .summary => try output.writeSummary(out, options.format, style, outcome),
         .list => try lister.finish(outcome),
+        .view => try viewer.finish(outcome),
         .quiet => {},
     }
     // Only the text forms say so themselves.
@@ -1031,7 +1040,8 @@ test "[unit] - [arguments]: each mode, format, and selection combines only where
         .{ .args = &.{ "--json", "--tsv" }, .problem = "--json and --tsv are both formats; pick one" },
         .{ .args = &.{ "-q", "--json" }, .problem = "--quiet prints nothing, so --json does not apply" },
         .{ .args = &.{ "--summary", "--severity", "major" }, .problem = "--summary counts everything, so --severity does not apply" },
-        .{ .args = &.{ "--limit", "5" }, .problem = "--limit works with --list" },
+        .{ .args = &.{ "--limit", "5" }, .problem = "--limit works with --list or --view" },
+        .{ .args = &.{ "--view", "--json" }, .problem = "--view is for people; for programs, use --list --json" },
         .{ .args = &.{ "--list", "--examples", "2" }, .problem = "--examples applies to the report only" },
         .{ .args = &.{ "--severity", "ignored" }, .problem = "--severity takes critical, major, or minor, not 'ignored'" },
         .{ .args = &.{ "--set", "MS:1000511" }, .problem = "--set takes KEY=LEVEL, not 'MS:1000511'" },
