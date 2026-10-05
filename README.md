@@ -94,6 +94,8 @@ Differences that remain but carry no meaning are kept as **minor**:
 - `run.txt`: the mzdiff and mzBridge commits and the mzValidate version.
 - `files/`: the JSON report per file, and any mzdiff stderr.
 
+With `-b BASELINE` (an earlier run's directory), it also writes `changes.tsv`: per file, the status change and every class that is new, gone, or hits more or fewer records. It exits 1 when a critical or major class is new or grown, so a converter change can be checked against the last run in one command: `tools/corpus.sh -o /var/tmp/after -b /var/tmp/before`.
+
 ## Speed and memory
 
 Each file is read and decoded on its own thread; the main thread pairs and compares, and memory stays bounded by the records in flight. Most of the time is zlib inflation and XML parsing inside zmz.

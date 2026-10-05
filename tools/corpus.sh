@@ -2,11 +2,13 @@
 # Converts corpus .raw files with one tool and compares each output with the TRFP reference
 # mzML beside the .raw, using mzdiff; also runs mzValidate on each output.
 #
-# usage: tools/corpus.sh [-t TOOL] [-o OUT] [-c DIR] [RAW...]
-#   -t TOOL  mzbridge (default), opentfraw, or mzdata
-#   -o OUT   directory for the per-file mzdiff TSVs and summary.tsv (default: a new /var/tmp dir)
-#   -c DIR   corpus root searched when no RAW is given (default: $MZDIFF_CORPUS)
-#   RAW...   files to check; default every .raw with a .mzML reference beside it
+# usage: tools/corpus.sh [-t TOOL] [-o OUT] [-c DIR] [-b BASELINE] [RAW...]
+#   -t TOOL      mzbridge (default), opentfraw, or mzdata
+#   -o OUT       directory for the results (default: a new /var/tmp directory)
+#   -c DIR       corpus root searched when no RAW is given (default: $MZDIFF_CORPUS)
+#   -b BASELINE  an earlier run's OUT to compare with: writes changes.tsv and exits 1 when a
+#                critical or major class is new or hits more records than before
+#   RAW...       files to check; default every .raw with a .mzML reference beside it
 #
 # MZBRIDGE names the mzBridge checkout (default: ../mzBridge beside this repository); its zig-out holds
 # mzBridge and its tools/bin the peers and mzValidate.
@@ -28,14 +30,20 @@ repo=$(cd "$repo" && pwd)
 tool=mzbridge
 out=""
 corpus=${MZDIFF_CORPUS:-}
-while getopts "t:o:c:h" flag; do
+baseline=""
+while getopts "t:o:c:b:h" flag; do
   case $flag in
     t) tool=$OPTARG ;;
     o) out=$OPTARG ;;
     c) corpus=$OPTARG ;;
-    *) sed -n '2,20p' "$0"; exit 2 ;;
+    b) baseline=$OPTARG ;;
+    *) sed -n '2,/^set -euo/p' "$0" | sed '$d'; exit 2 ;;
   esac
 done
+if [ -n "$baseline" ] && [ ! -f "$baseline/summary.tsv" ]; then
+  echo "baseline has no summary.tsv: $baseline" >&2
+  exit 2
+fi
 shift $((OPTIND - 1))
 case $tool in mzbridge | opentfraw | mzdata) ;; *) echo "unknown tool: $tool" >&2; exit 2 ;; esac
 
@@ -169,3 +177,51 @@ for key in files:
 PYTHON
 awk -F'\t' 'NR > 1 { split($2, s, ":"); n[s[1]]++ } END { for (k in n) printf "  %-16s %d\n", k, n[k] }' "$summary" | sort
 echo "results: $out (summary.tsv, classes.tsv, run.txt, files/ with one JSON report per file)"
+[ -n "$baseline" ] || exit 0
+
+# Against the baseline: per file, the status change and every class that is new, gone, or hits
+# more or fewer records; a new or grown critical or major class is a regression.
+python3 - "$baseline" "$out" << 'PYTHON'
+import glob, json, os, sys
+before_dir, after_dir = sys.argv[1:]
+
+def statuses(run):
+    rows = [line.rstrip("\n").split("\t") for line in open(os.path.join(run, "summary.tsv"))][1:]
+    return {row[0]: row[1] for row in rows}
+
+def classes(run):
+    found = {}
+    for path in glob.glob(os.path.join(run, "files", "*.json")):
+        name = os.path.basename(path)[: -len(".json")]
+        found[name] = {(c["severity"], c["kind"], c["path"], c["key"]): c["records"] for c in json.load(open(path))["classes"]}
+    return found
+
+status_before, status_after = statuses(before_dir), statuses(after_dir)
+classes_before, classes_after = classes(before_dir), classes(after_dir)
+rows, regressions, improvements = [], 0, 0
+for name in sorted(set(status_before) | set(status_after)):
+    s0, s1 = status_before.get(name, "-"), status_after.get(name, "-")
+    if s0 != s1:
+        rows.append([name, "status", "", "", "", "", s0, s1])
+    c0, c1 = classes_before.get(name, {}), classes_after.get(name, {})
+    if name not in classes_before or name not in classes_after:
+        continue  # not compared on one side: the status row says why
+    for key in sorted(set(c0) | set(c1)):
+        r0, r1 = c0.get(key, 0), c1.get(key, 0)
+        if r0 == r1:
+            continue
+        change = "new" if r0 == 0 else "gone" if r1 == 0 else "more" if r1 > r0 else "fewer"
+        serious = key[0] in ("critical", "major")
+        if serious and change in ("new", "more"):
+            regressions += 1
+        elif change in ("gone", "fewer"):
+            improvements += 1
+        rows.append([name, change, *key, str(r0), str(r1)])
+with open(os.path.join(after_dir, "changes.tsv"), "w") as out:
+    out.write("file\tchange\tseverity\tkind\tpath\tkey\tbefore\tafter\n")
+    for row in rows:
+        out.write("\t".join(row) + "\n")
+print(f"against {before_dir}: {regressions} regressions (critical or major classes new or grown), "
+      f"{improvements} improvements, {sum(1 for r in rows if r[1] == 'status')} status changes; see changes.tsv")
+sys.exit(1 if regressions else 0)
+PYTHON
