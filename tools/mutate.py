@@ -254,6 +254,12 @@ def ms_level_in_group(t):
     blk = blk[:line.start()] + '          <referenceableParamGroupRef ref="mutateMsLevel" />\n' + blk[line.end():]
     return t[:a0] + blk + t[a1:]
 
+# Form: the same data written so some readers fail. mzdiff must report it itself, not leave it
+# to mzValidate.
+
+def charge_spelled(t):
+    return param_value(t, 5, "MS:1000041", lambda v: v + ".0")
+
 # Meaning-preserving edits: mzdiff must report nothing above minor.
 
 def same_param_order(t):
@@ -366,6 +372,7 @@ CASES = [
     ("same_value_whitespace", same_value_whitespace, None),
     ("same_seconds", same_seconds, None),
     ("ms_level_in_group", ms_level_in_group, "form:paramGroup"),
+    ("charge_spelled", charge_spelled, "form:integer"),
     ("same_uncompressed", same_uncompressed, None),
     ("same_float32", same_float32, "minor:precision"),
     ("peaks_reversed", same_peak_order, "array:peaks"),
