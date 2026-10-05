@@ -4,7 +4,7 @@
 mzdiff [options] A.mzML B.mzML
 ```
 
-A is the reference, B the output under test; mzdiff judges B against A. `mzdiff --help` lists every option.
+A is the reference, B the output under test; mzdiff judges B against A. `mzdiff --help` lists every option, and `mzdiff --version` prints the version. An option's value follows it (`--limit 10`) or joins it (`--limit=10`), and `--` ends the options, for a file whose name starts with `-`.
 
 Modes choose what is shown, formats choose how, and selection narrows it. None of them changes the verdict.
 
@@ -49,7 +49,14 @@ One at a time:
 
 With `--max-spectra`, the result is also marked `incomplete`.
 
-Exit status 0 for same or tolerated, 1 for differs, 2 for a usage error or an unreadable file. A file cut short or malformed fails to read; mzdiff never prints a partial report as if it were complete.
+| Exit | Meaning |
+|---|---|
+| 0 | same, or tolerated: nothing at or above `--fail-on` differs |
+| 1 | differs |
+| 2 | usage error: the command is wrong; nothing was compared |
+| 3 | the comparison could not complete: a file is missing, unreadable, malformed, or cut short |
+
+The codes match mzValidate's. A run that cannot complete prints one line to stderr naming the side and the file (`mzdiff: B tool.mzML: no such file`), and never a partial report as if it were complete. With `--json` it also prints a JSON error object to stdout, so a pipeline always has JSON to read ([JSON output](JSON-output#errors)).
 
 ## The view
 

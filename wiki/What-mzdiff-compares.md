@@ -18,7 +18,7 @@ mzdiff judges B against A. What B adds that A lacks is a difference only where i
 - **Precursor order.** A spectrum's precursors are the one repeated element whose order counts: they run from the nearest stage back, and readers take the first as the spectrum's precursor. The same precursors in another order are `precursorOrder`.
 - **Each scan's instrument configuration**: the source, analyzer, and detector of the configuration the scan names (or the run's default), so a spectrum filed under the ion trap instead of the orbitrap differs even when both configurations exist in the header.
 - **Arrays** as decoded values, matched by role (m/z, intensity, time, others) and unit. Time arrays in seconds and in minutes compare as the same values. The same peaks in another order are a difference (`array:peaks`): readers that deisotope or search the peaks assume rising m/z.
-- **The index trailer.** An indexed file must end with `indexListOffset`, `fileChecksum`, and `</indexedmzML>`, the offset pointing at the index. B losing the index A has is a difference. A file cut short anywhere else fails to read (exit 2).
+- **The index trailer.** An indexed file must end with `indexListOffset`, `fileChecksum`, and `</indexedmzML>`, the offset pointing at the index. B losing the index A has is a difference. A file cut short anywhere else fails to read (exit 3).
 
 ## Ignored
 

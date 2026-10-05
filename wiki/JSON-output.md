@@ -6,7 +6,7 @@ There is no library API: the JSON is the machine interface. Keys and kinds are t
 
 `--json` with the report or `--summary` prints one document (schema 1) with:
 
-- `schema_version`
+- `schema_version`, and `tool` (`name`, `version`): which mzdiff wrote it
 - both sides: `path`, `software`, `spectra`, `chromatograms`
 - `paired`, `completion`, `status`, `fail_on`
 - `totals`: classes per severity
@@ -17,11 +17,25 @@ The report adds `classes`, each with `severity`, `kind`, `label`, `path`, `key`,
 
 `--list --json` prints JSON Lines: one line per difference, then a summary line. A difference line has `type`, `record`, `severity`, `kind`, `path`, `key`, `name`, `a`, and `b`, and for arrays `values`, `differing`, and `largest`.
 
-A run that fails part way (an unreadable record, say) ends the stream with `{"type": "error", "error": NAME}` instead of the summary line, so a reader can tell a cut stream from a complete one.
+A run that fails part way (an unreadable record, say) ends the stream with the error object below instead of the summary line, so a reader can tell a cut stream from a complete one.
 
 ```bash
 mzdiff --list --json A.mzML B.mzML | jq -r 'select(.type == "difference") | .key' | sort | uniq -c
 ```
+
+## Errors
+
+A run that cannot complete (exit 3) prints one error object: the whole output for the report and the summary, the last line for the list.
+
+```json
+{"type": "error", "schema_version": 1, "tool": {"name": "mzdiff", "version": "0.1.0"}, "error": "FileNotFound", "side": "b", "path": "tool.mzML", "message": "no such file"}
+```
+
+- `error`: the error's name, stable for scripts (`FileNotFound`, `IsDir`, `InvalidXml`, `DecodedSizeMismatch`, ...).
+- `side` and `path`: which file, or `null` when the failure is not one file's (out of memory, an output that cannot be written).
+- `message`: a sentence for people; for a malformed file, the reader's diagnostic with its code and position.
+
+A usage error (exit 2) prints no JSON: the command itself is wrong, and stderr says how.
 
 ## Kinds
 

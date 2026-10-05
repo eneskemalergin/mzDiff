@@ -48,7 +48,7 @@ Sage's outcome for the 200 spectra: **fatal** (the run fails or reads nothing), 
 | arrays uncompressed | same | valid | none |
 | m/z array in MS-Numpress | major (`form:numpress`) | error (Numpress is standard) | 200 lost |
 | base64 broken across lines | same (not yet visible) | valid | fatal |
-| `defaultArrayLength` one too high | fails to read (exit 2) | error | none |
+| `defaultArrayLength` one too high | fails to read (exit 3) | error | none |
 | native ids renamed | critical | error | none |
 | index removed | major (`indexed`) | valid | none |
 

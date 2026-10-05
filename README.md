@@ -56,7 +56,7 @@ controllerType=0 controllerNumber=1 scan=5
 complete: differs | classes: critical 0, major 11, minor 14 | spectra: A 2103, B 2103, paired 2103 | chromatograms: A 1, B 2, paired 1
 ```
 
-The verdict is `same`, `tolerated` (nothing at or above `--fail-on`, default `major`), or `differs`. Exit status 0 for same or tolerated, 1 for differs, 2 for a usage error or an unreadable file. [Usage](wiki/Usage.md) covers every mode, format, and option, and [Reading a report](wiki/Reading-a-report.md) what each kind of difference says about the tool that wrote B.
+The verdict is `same`, `tolerated` (nothing at or above `--fail-on`, default `major`), or `differs`. Exit status 0 for same or tolerated, 1 for differs, 2 for a usage error, and 3 when the comparison cannot complete (a file missing, unreadable, or cut short), as for mzValidate. [Usage](wiki/Usage.md) covers every mode, format, and option, and [Reading a report](wiki/Reading-a-report.md) what each kind of difference says about the tool that wrote B.
 
 ## Install
 
