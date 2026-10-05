@@ -65,6 +65,38 @@ pub const Kind = enum {
 
 pub const Example = struct { id: []const u8, a: []const u8, b: []const u8 };
 
+/// One difference as found, before it is filed under a class. Strings borrow from the caller and
+/// last only for the `Sink.emit` call.
+pub const Difference = struct {
+    record: []const u8,
+    severity: Severity,
+    kind: Kind,
+    path: []const u8,
+    key: []const u8,
+    name: []const u8,
+    a: []const u8,
+    b: []const u8,
+    array: ?ArrayDetail = null,
+};
+
+/// How a differing array differs: values compared, how many differ, and the largest difference
+/// (relative to the larger of the two values).
+pub const ArrayDetail = struct {
+    values: usize,
+    /// The index the difference's `a` and `b` show.
+    shown: usize = 0,
+    differing: usize,
+    largest: usize,
+    largest_a: f64,
+    largest_b: f64,
+};
+
+/// Receives every difference `Report.add` files, in the order found.
+pub const Sink = struct {
+    context: *anyopaque,
+    emit: *const fn (*anyopaque, Difference) anyerror!void,
+};
+
 pub const Class = struct {
     severity: Severity,
     kind: Kind,
@@ -88,6 +120,8 @@ pub const Report = struct {
     record: usize = 0,
     /// Paths with a real difference in the current record (set by `diffFacts`).
     dirty: std.ArrayList([]const u8) = .empty,
+    /// Sees every difference before it is filed, for `--list`.
+    sink: ?Sink = null,
 
     pub fn init(allocator: std.mem.Allocator, rules: *Rules, max_examples: usize) Report {
         return .{ .allocator = allocator, .rules = rules, .max_examples = max_examples };
@@ -141,10 +175,37 @@ pub const Report = struct {
         a: []const u8,
         b: []const u8,
     ) !void {
+        try self.addDetailed(severity, kind, path, key, name, id, a, b, null);
+    }
+
+    /// `add` with an array's detail for the sink.
+    pub fn addDetailed(
+        self: *Report,
+        severity: ?Severity,
+        kind: Kind,
+        path: []const u8,
+        key: []const u8,
+        name: []const u8,
+        id: []const u8,
+        a: []const u8,
+        b: []const u8,
+        array: ?ArrayDetail,
+    ) !void {
         var level = severity orelse self.rules.severity(key);
         if (level == .ignored) return;
         // fileContent summarises the spectra, which are compared themselves.
         if (level == .critical and std.mem.indexOf(u8, path, "fileContent") != null) level = .major;
+        if (self.sink) |sink| try sink.emit(sink.context, .{
+            .record = id,
+            .severity = level,
+            .kind = kind,
+            .path = path,
+            .key = key,
+            .name = if (name.len != 0) name else self.rules.name(key) orelse "",
+            .a = a,
+            .b = b,
+            .array = array,
+        });
         var key_buffer: [512]u8 = undefined;
         const class_key = std.fmt.bufPrint(&key_buffer, "{s}\x1f{s}\x1f{s}", .{ path, key, @tagName(kind) }) catch
             try std.fmt.allocPrint(self.allocator, "{s}\x1f{s}\x1f{s}", .{ path, key, @tagName(kind) });
@@ -434,7 +495,7 @@ fn diffGroup(report: *Report, id: []const u8, a: []const Fact, b: []const Fact) 
         if (!std.mem.eql(u8, x.unit, y.unit)) {
             if (x.unit.len != 0 and y.unit.len != 0) {
                 try report.addDirty(null, .unit, x.path, x.key, x.name, id, x.unit, y.unit);
-                return;
+                continue;
             }
             try report.add(oneSidedUnit(report, x.key, x.unit), .unit, x.path, x.key, x.name, id, orDash(x.unit), orDash(y.unit));
             // With a unit on one side only, the values compare as printed, not converted.
@@ -442,11 +503,10 @@ fn diffGroup(report: *Report, id: []const u8, a: []const Fact, b: []const Fact) 
             y = asPrinted(y);
         }
         switch (compareValues(report.ppm, x, y)) {
-            .same => continue,
+            .same => {},
             .different => try report.addDirty(null, .value, x.path, x.key, x.name, id, x.text, y.text),
             inline else => |kind| try report.add(.minor, @field(Kind, @tagName(kind)), x.path, x.key, x.name, id, x.text, y.text),
         }
-        return;
     }
 }
 
@@ -833,11 +893,14 @@ pub fn compareArrays(
         const shown = mismatch.beyond orelse at;
         const ta = try std.fmt.allocPrint(arena, "[{d}] {d}", .{ shown, valueAt(x.values, shown) });
         const tb = try std.fmt.allocPrint(arena, "[{d}] {d}", .{ shown, valueAt(y.values, shown) });
+        // Counting every differing value costs a pass, so it is done only for a listing.
+        var detail: ?ArrayDetail = if (report.sink != null) arrayDetail(x.values, y.values) else null;
+        if (detail) |*found| found.shown = shown;
         if (mismatch.beyond == null) {
             const close = sameAt32(valueAt(x.values, at), valueAt(y.values, at));
-            try report.add(.minor, if (close) .narrow else .ppm, path, x.key, "", id, ta, tb);
+            try report.addDetailed(.minor, if (close) .narrow else .ppm, path, x.key, "", id, ta, tb, detail);
         } else {
-            try report.add(null, .peak_values, path, x.key, "", id, ta, tb);
+            try report.addDetailed(null, .peak_values, path, x.key, "", id, ta, tb, detail);
         }
     }
     for (arrays_b, 0..) |y, position| {
@@ -971,6 +1034,26 @@ fn firstMismatch(a: mzml.DecodedArrays.Values, b: mzml.DecodedArrays.Values, ppm
         }
     }
     return result;
+}
+
+fn arrayDetail(a: mzml.DecodedArrays.Values, b: mzml.DecodedArrays.Values) ArrayDetail {
+    var detail: ArrayDetail = .{ .values = len(a), .differing = 0, .largest = 0, .largest_a = 0, .largest_b = 0 };
+    var worst: f64 = -1;
+    for (0..len(a)) |i| {
+        const p = valueAt(a, i);
+        const q = valueAt(b, i);
+        if (p == q or (std.math.isNan(p) and std.math.isNan(q))) continue;
+        detail.differing += 1;
+        const scale = @max(@abs(p), @abs(q));
+        const relative = if (std.math.isNan(p) or std.math.isNan(q)) std.math.inf(f64) else if (scale == 0) 0 else @abs(p - q) / scale;
+        if (relative > worst) {
+            worst = relative;
+            detail.largest = i;
+            detail.largest_a = p;
+            detail.largest_b = q;
+        }
+    }
+    return detail;
 }
 
 // Whether both records hold the same (m/z, intensity) pairs in another order. Pairs already in

@@ -22,13 +22,35 @@ A difference mzdiff fails to report is its worst defect, so every check comes wi
 ```bash
 zig build -Doptimize=ReleaseFast                         # needs zmz checked out next to this repository (../zmz)
 zig build test --summary all                             # self-contained tests; no data files needed
-./zig-out/bin/mzdiff REFERENCE.mzML OTHER.mzML           # report, most severe classes first
-./zig-out/bin/mzdiff --tsv REFERENCE.mzML OTHER.mzML     # one row per difference class
+./zig-out/bin/mzdiff REFERENCE.mzML OTHER.mzML           # report: difference classes, most severe first
+./zig-out/bin/mzdiff --summary REFERENCE.mzML OTHER.mzML # one line: the verdict and its counts
+./zig-out/bin/mzdiff --list REFERENCE.mzML OTHER.mzML    # every difference, in the order found
 tools/corpus.sh [-t mzbridge|opentfraw|mzdata] [RAW...]  # convert and compare the corpus, one file at a time
 tools/mutate.py zig-out/bin/mzdiff REFERENCE.mzML        # inject defects and check each one is caught
 ```
 
 Requires **Zig 0.16.0** and the zmz package (`../zmz`), which reads the mzML. `corpus.sh` also uses the mzBridge checkout beside this one (`../mzBridge`, or `MZBRIDGE=PATH`): its `zig-out/bin/mzBridge`, and the peers and mzValidate in its `tools/bin/`.
+
+## Usage
+
+Modes choose what is shown, formats choose how, and selection narrows it. None of them changes the verdict.
+
+- **Modes**, one at a time: the report by default (difference classes, most severe and most frequent first, with `--examples N` examples each); `--summary` (one line: the verdict and its counts); `--list` (every difference, one per line, in the order found, grouped under its record; an array that differs is one line with how many values differ and the largest difference); `-q`, `--quiet` (nothing; the exit status is the answer).
+- **Formats**: text by default, colored under `--color auto|always|never` (`NO_COLOR` and `CLICOLOR_FORCE` are honored); `--json` (one document for the report and the summary, JSON Lines for `--list`, ending with a summary line); `--tsv` (the report's columns are stable for scripts).
+- **Selection**: `--severity LEVEL` shows that level and above; `--key KEY` and, with `--list`, `--record ID` keep only those keys and records (each repeatable); `--limit N` caps a list and says how much it held back.
+- **Verdict**: `same` (no difference), `tolerated` (nothing at or above `--fail-on`, default `major`), or `differs`; `incomplete` when `--max-spectra` stopped early. Exit status 0 for same or tolerated, 1 for differs, 2 for a usage error or an unreadable file.
+
+Watching how two tools write the same file:
+
+```bash
+mzdiff --list --severity major trfp.mzML tool.mzML                 # everything that matters, spectrum by spectrum
+mzdiff --list --key MS:1000512 trfp.mzML tool.mzML                 # how each filter string differs
+mzdiff --list --record "controllerType=0 controllerNumber=1 scan=5" trfp.mzML tool.mzML
+mzdiff --list --json trfp.mzML tool.mzML | jq -r 'select(.type == "difference") | .key' | sort | uniq -c
+mzdiff -q trfp.mzML tool.mzML && echo "nothing that matters differs"
+```
+
+JSON schema 1 carries `schema_version`, both sides (`path`, `software`, `spectra`, `chromatograms`), `paired`, `completion`, `status`, `fail_on`, and `totals` (classes per severity). The report adds `classes`, each with `severity`, `kind`, `label`, `path`, `key`, `name`, `records`, and `examples`. A list line has `type`, `record`, `severity`, `kind`, `path`, `key`, `name`, `a`, `b`, and for arrays `values`, `differing`, and `largest`. Keys and kinds are the stable contract; labels and names may improve. There is no library API: the JSON is the machine interface.
 
 ## What it compares
 
@@ -63,18 +85,14 @@ Differences that remain but carry no meaning are kept as **minor**:
 
 `--set KEY=LEVEL` overrides one key: `MS:1000512=minor`, `user:NAME=ignored`, `@spectrumRef=minor`, `array:MS:1000515=major`.
 
-## Output and exit status
-
-The report lists classes of differences, most severe and most frequent first, each with the number of records it hits and examples (`--examples N`). `--tsv` prints one row per class for scripts. The exit status is 0 when nothing at or above `--fail-on` (default `major`) differs, 1 when something does, and 2 for a usage error or an unreadable file.
-
 ## Corpus runs
 
 `corpus.sh` rebuilds mzdiff (and mzBridge, for `-t mzbridge`) before it starts, so a run never uses a stale binary. It writes:
 
-- `summary.tsv`: one status per file: `same`, `differs`, `invalid` (mzValidate found errors), `differs+invalid`, `convert failed: ...`, or `mzdiff failed: ...`.
+- `summary.tsv`: one row per file: mzdiff's verdict (`same`, `tolerated`, `differs`, with `+invalid` when mzValidate found errors, or `nothing paired`), the class counts, and the paired spectra; or `convert failed: ...` and `mzdiff failed: ...`.
 - `classes.tsv`: each difference class across the run, with the files and records it hits.
 - `run.txt`: the mzdiff and mzBridge commits and the mzValidate version.
-- `files/`: the per-file TSVs, and any mzdiff stderr.
+- `files/`: the JSON report per file, and any mzdiff stderr.
 
 ## Speed and memory
 
