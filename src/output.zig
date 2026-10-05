@@ -7,6 +7,9 @@
 //! list's lines, while `Outcome` (status, completion, totals) always describes the whole
 //! comparison. JSON is schema 1: the report and the summary are one document each, the list is
 //! JSON Lines ending with a summary line. Text may carry ANSI color; TSV and JSON never do.
+//!
+//! `Tally`, `describe`, `isTolerance`, `writeShortPath`, and `writeLargest` are public for the HTML
+//! view in `html.zig` only.
 
 const std = @import("std");
 
@@ -19,7 +22,7 @@ const Severity = rules_mod.Severity;
 
 pub const Mode = enum { report, summary, list, view, quiet };
 
-pub const Format = enum { text, tsv, json };
+pub const Format = enum { text, tsv, json, html };
 
 /// `same`: no difference at all; `tolerated`: none at or above `--fail-on`; `differs`: some.
 pub const Status = enum { same, tolerated, differs };
@@ -154,7 +157,7 @@ pub fn writeReport(
             }
             try out.writeAll(if (first) "]\n}\n" else "\n  ]\n}\n");
         },
-        .text => {
+        .text, .html => {
             try writeHeadText(out, style, outcome);
             var shown: usize = 0;
             var current: ?Severity = null;
@@ -188,7 +191,7 @@ pub fn writeReport(
 
 pub fn writeSummary(out: *std.Io.Writer, format: Format, style: Style, outcome: Outcome) !void {
     switch (format) {
-        .text => try writeSummaryLine(out, style, outcome),
+        .text, .html => try writeSummaryLine(out, style, outcome),
         .tsv => {
             try out.writeAll("completion\tstatus\tfail_on\tcritical\tmajor\tminor\ta_spectra\tb_spectra\tpaired_spectra\t" ++
                 "a_chromatograms\tb_chromatograms\tpaired_chromatograms\n");
@@ -236,7 +239,7 @@ pub const Lister = struct {
         };
         self.shown += 1;
         switch (self.format) {
-            .text => try self.text(difference),
+            .text, .html => try self.text(difference),
             .tsv => {
                 if (!self.started) try self.out.writeAll("record\tseverity\tkind\tpath\tkey\tname\ta\tb\n");
                 try writeTsvField(self.out, difference.record);
@@ -314,7 +317,7 @@ pub const Lister = struct {
     /// Ends the list: the summary line or object, and how many lines `--limit` held back.
     pub fn finish(self: *Lister, outcome: Outcome) !void {
         switch (self.format) {
-            .text => {
+            .text, .html => {
                 if (self.shown != 0) try self.out.writeByte('\n');
                 if (self.hidden != 0) try self.out.print("{d} more differences not shown (--limit)\n", .{self.hidden});
                 try writeSummaryLine(self.out, self.style, outcome);
@@ -331,6 +334,109 @@ pub const Lister = struct {
 
 pub const Layout = enum { unified, side_by_side };
 
+/// What a view counts while it renders: the records shown, each record's most severe difference,
+/// the keys by how many records they differ in, and whether the view grew too large to show.
+pub const Tally = struct {
+    allocator: std.mem.Allocator,
+    /// Records the view shows at most.
+    records: usize,
+    shown: usize = 0,
+    /// Differing records by their most severe shown difference: critical, major, minor.
+    differing: [3]usize = .{ 0, 0, 0 },
+    worst: ?Severity = null,
+    too_large: bool = false,
+    last_record: std.ArrayList(u8) = .empty,
+    keys: std.StringHashMapUnmanaged(KeyCount) = .empty,
+
+    const KeyCount = struct { name: []const u8, records: usize, last: usize };
+
+    pub fn deinit(self: *Tally) void {
+        var it = self.keys.iterator();
+        while (it.next()) |entry| {
+            self.allocator.free(entry.key_ptr.*);
+            self.allocator.free(entry.value_ptr.name);
+        }
+        self.keys.deinit(self.allocator);
+        self.last_record.deinit(self.allocator);
+    }
+
+    /// Counts one shown difference; returns whether it opens a new record.
+    pub fn note(self: *Tally, difference: Difference) !bool {
+        const opens = !std.mem.eql(u8, self.last_record.items, difference.record);
+        if (opens) {
+            self.close();
+            self.last_record.clearRetainingCapacity();
+            try self.last_record.appendSlice(self.allocator, difference.record);
+            self.shown += 1;
+            if (self.shown > self.records) self.too_large = true;
+        }
+        if (self.worst == null or @intFromEnum(difference.severity) < @intFromEnum(self.worst.?)) self.worst = difference.severity;
+        try self.countKey(difference);
+        return opens;
+    }
+
+    fn countKey(self: *Tally, difference: Difference) !void {
+        if (self.keys.getPtr(difference.key)) |found| {
+            if (found.last == self.shown) return;
+            found.last = self.shown;
+            found.records += 1;
+            return;
+        }
+        const key = try self.allocator.dupe(u8, difference.key);
+        errdefer self.allocator.free(key);
+        const name = try self.allocator.dupe(u8, difference.name);
+        errdefer self.allocator.free(name);
+        try self.keys.put(self.allocator, key, .{ .name = name, .records = 1, .last = self.shown });
+    }
+
+    pub fn close(self: *Tally) void {
+        if (self.worst) |worst| self.differing[@intFromEnum(worst)] += 1;
+        self.worst = null;
+    }
+
+    pub fn total(self: *const Tally) usize {
+        return self.differing[0] + self.differing[1] + self.differing[2];
+    }
+
+    /// The keys that differ in the most records, most first.
+    fn topKeys(self: *const Tally) [3]?TopKey {
+        var top: [3]?TopKey = .{ null, null, null };
+        var it = self.keys.iterator();
+        while (it.next()) |entry| {
+            var candidate: ?TopKey = .{ .key = entry.key_ptr.*, .name = entry.value_ptr.name, .records = entry.value_ptr.records };
+            for (&top) |*slot| {
+                if (slot.* == null or candidate.?.records > slot.*.?.records) {
+                    const pushed = slot.*;
+                    slot.* = candidate;
+                    candidate = pushed;
+                    if (candidate == null) break;
+                }
+            }
+        }
+        return top;
+    }
+
+    const TopKey = struct { key: []const u8, name: []const u8, records: usize };
+
+    // How large the view would have been and what to narrow it by: a severity that would cut the
+    // count under the cap, and the keys that hit the most records.
+    pub fn writeRefusal(self: *const Tally, out: *std.Io.Writer) !void {
+        try out.print("mzdiff: too large to view: {d} records differ (critical {d}, major {d}, minor {d});" ++
+            " the view shows at most {d}.\n", .{ self.total(), self.differing[0], self.differing[1], self.differing[2], self.records });
+        if (self.differing[0] != 0 and self.differing[0] <= self.records)
+            try out.print("mzdiff:   --severity critical  shows {d} records\n", .{self.differing[0]});
+        const serious = self.differing[0] + self.differing[1];
+        if (self.differing[2] != 0 and serious != 0 and serious <= self.records)
+            try out.print("mzdiff:   --severity major     shows {d} records\n", .{serious});
+        for (self.topKeys()) |slot| if (slot) |found| {
+            try out.print("mzdiff:   --key {s}", .{found.key});
+            if (found.name.len != 0) try out.print("  ({s})", .{found.name});
+            try out.print(" differs in {d} records\n", .{found.records});
+        };
+        try out.writeAll("mzdiff:   --record ID shows one record; --limit N raises the cap; --list shows everything\n\n");
+    }
+};
+
 /// Renders the differing records as a git-style diff: a header per record, the element path, then
 /// `-` for A and `+` for B (`~` when the difference is within a tolerance), or two columns side by
 /// side. The text is built in a bounded buffer while the comparison runs; when more than `records`
@@ -341,35 +447,26 @@ pub const Viewer = struct {
     selection: Selection,
     layout: Layout = .unified,
     width: usize = 160,
-    records: usize = 40,
     bytes: usize = 1 << 20,
     buffer: std.Io.Writer.Allocating,
-    last_record: std.ArrayList(u8) = .empty,
     last_path: std.ArrayList(u8) = .empty,
     allocator: std.mem.Allocator,
-    shown: usize = 0,
-    /// Differing records by their most severe shown difference: critical, major, minor.
-    differing: [3]usize = .{ 0, 0, 0 },
-    worst: ?Severity = null,
-    too_large: bool = false,
-    /// Per key: how many records it differs in, to say what to narrow by when the view is refused.
-    keys: std.StringHashMapUnmanaged(KeyCount) = .empty,
-
-    const KeyCount = struct { name: []const u8, records: usize, last: usize };
+    tally: Tally,
 
     pub fn init(allocator: std.mem.Allocator, out: *std.Io.Writer, style: Style, selection: Selection) Viewer {
-        return .{ .out = out, .style = style, .selection = selection, .buffer = .init(allocator), .allocator = allocator };
+        return .{
+            .out = out,
+            .style = style,
+            .selection = selection,
+            .buffer = .init(allocator),
+            .allocator = allocator,
+            .tally = .{ .allocator = allocator, .records = 40 },
+        };
     }
 
     pub fn deinit(self: *Viewer) void {
-        var it = self.keys.iterator();
-        while (it.next()) |entry| {
-            self.allocator.free(entry.key_ptr.*);
-            self.allocator.free(entry.value_ptr.name);
-        }
-        self.keys.deinit(self.allocator);
+        self.tally.deinit();
         self.buffer.deinit();
-        self.last_record.deinit(self.allocator);
         self.last_path.deinit(self.allocator);
     }
 
@@ -380,18 +477,11 @@ pub const Viewer = struct {
     fn emit(context: *anyopaque, difference: Difference) anyerror!void {
         const self: *Viewer = @ptrCast(@alignCast(context));
         if (!self.selection.shows(difference.severity, difference.key, difference.record)) return;
-        if (!std.mem.eql(u8, self.last_record.items, difference.record)) {
-            self.closeRecord();
-            self.last_record.clearRetainingCapacity();
-            try self.last_record.appendSlice(self.allocator, difference.record);
+        if (try self.tally.note(difference)) {
             self.last_path.clearRetainingCapacity();
-            self.shown += 1;
-            if (self.shown > self.records) self.drop();
-            if (!self.too_large) try self.recordHeader(difference.record);
+            if (self.tally.too_large) self.drop() else try self.recordHeader(difference.record);
         }
-        if (self.worst == null or @intFromEnum(difference.severity) < @intFromEnum(self.worst.?)) self.worst = difference.severity;
-        try self.countKey(difference);
-        if (self.too_large) return;
+        if (self.tally.too_large) return;
         const w = &self.buffer.writer;
         // Arrays sit under their own heading, apart from the record's parameters.
         const arrays = std.mem.startsWith(u8, difference.key, "array:");
@@ -414,34 +504,15 @@ pub const Viewer = struct {
         if (self.buffer.written().len > self.bytes) self.drop();
     }
 
-    fn countKey(self: *Viewer, difference: Difference) !void {
-        const entry = try self.keys.getOrPut(self.allocator, difference.key);
-        if (!entry.found_existing) {
-            entry.key_ptr.* = self.allocator.dupe(u8, difference.key) catch |err| {
-                _ = self.keys.remove(difference.key);
-                return err;
-            };
-            entry.value_ptr.* = .{ .name = try self.allocator.dupe(u8, difference.name), .records = 0, .last = 0 };
-        }
-        if (entry.value_ptr.last == self.shown) return;
-        entry.value_ptr.last = self.shown;
-        entry.value_ptr.records += 1;
-    }
-
-    fn closeRecord(self: *Viewer) void {
-        if (self.worst) |worst| self.differing[@intFromEnum(worst)] += 1;
-        self.worst = null;
-    }
-
     // Too much to show: keep counting, stop rendering.
     fn drop(self: *Viewer) void {
-        self.too_large = true;
+        self.tally.too_large = true;
         self.buffer.clearRetainingCapacity();
     }
 
     fn recordHeader(self: *Viewer, record: []const u8) !void {
         const w = &self.buffer.writer;
-        if (self.shown > 1) try w.writeByte('\n');
+        if (self.tally.shown > 1) try w.writeByte('\n');
         if (self.style.color) try w.writeAll("\x1b[1m");
         try w.print("{s}", .{record});
         if (self.style.color) try w.writeAll("\x1b[0m");
@@ -552,53 +623,20 @@ pub const Viewer = struct {
         if (self.style.color) try w.writeAll(if (on) "\x1b[2m" else "\x1b[0m");
     }
 
-    // What to narrow by: a severity that would cut the count, and the keys that hit the most records.
-    fn refusalHelp(self: *Viewer) !void {
-        const out = self.out;
-        if (self.differing[0] != 0 and self.differing[0] <= self.records)
-            try out.print("mzdiff:   --severity critical  shows {d} records\n", .{self.differing[0]});
-        if (self.differing[2] != 0 and self.differing[0] + self.differing[1] != 0 and self.differing[0] + self.differing[1] <= self.records)
-            try out.print("mzdiff:   --severity major     shows {d} records\n", .{self.differing[0] + self.differing[1]});
-        var top: [3]?struct { key: []const u8, count: KeyCount } = .{ null, null, null };
-        var it = self.keys.iterator();
-        while (it.next()) |entry| {
-            var candidate: @TypeOf(top[0]) = .{ .key = entry.key_ptr.*, .count = entry.value_ptr.* };
-            for (&top) |*slot| {
-                if (slot.* == null or candidate.?.count.records > slot.*.?.count.records) {
-                    const pushed = slot.*;
-                    slot.* = candidate;
-                    candidate = pushed;
-                    if (candidate == null) break;
-                }
-            }
-        }
-        for (top) |slot| if (slot) |found| {
-            try out.print("mzdiff:   --key {s}", .{found.key});
-            if (found.count.name.len != 0) try out.print("  ({s})", .{found.count.name});
-            try out.print(" differs in {d} records\n", .{found.count.records});
-        };
-        try out.writeAll("mzdiff:   --record ID shows one record; --limit N raises the cap; --list shows everything\n\n");
-    }
-
     /// Prints the view, or, when it is too large, how large and how to narrow it; then the summary.
     pub fn finish(self: *Viewer, outcome: Outcome) !void {
-        self.closeRecord();
-        const total = self.differing[0] + self.differing[1] + self.differing[2];
-        if (self.too_large) {
-            try self.out.print("mzdiff: too large to view: {d} records differ (critical {d}, major {d}, minor {d});" ++
-                " the view shows at most {d}.\n", .{
-                total, self.differing[0], self.differing[1], self.differing[2], self.records,
-            });
-            try self.refusalHelp();
+        self.tally.close();
+        if (self.tally.too_large) {
+            try self.tally.writeRefusal(self.out);
         } else {
             try self.out.writeAll(self.buffer.written());
-            if (total != 0) try self.out.writeByte('\n');
+            if (self.tally.total() != 0) try self.out.writeByte('\n');
         }
         try writeSummaryLine(self.out, self.style, outcome);
     }
 };
 
-fn writeLargest(w: *std.Io.Writer, array: compare.ArrayDetail) !void {
+pub fn writeLargest(w: *std.Io.Writer, array: compare.ArrayDetail) !void {
     try w.print("; largest at [{d}]: {d} against {d}", .{ array.largest, array.largest_a, array.largest_b });
 }
 
@@ -611,7 +649,7 @@ fn sideValue(difference: Difference, side: Viewer.Which) []const u8 {
     return if (difference.kind == here) "(present)" else "-";
 }
 
-fn isTolerance(kind: compare.Kind) bool {
+pub fn isTolerance(kind: compare.Kind) bool {
     return switch (kind) {
         .narrow, .rounding, .ppm, .precision, .peak_order => true,
         else => false,
@@ -620,7 +658,7 @@ fn isTolerance(kind: compare.Kind) bool {
 
 // The left-hand name of a difference: what it is, and what about it differs when that is not its
 // value ("base peak m/z (unit)").
-fn describe(buffer: []u8, difference: Difference) []const u8 {
+pub fn describe(buffer: []u8, difference: Difference) []const u8 {
     const name = if (difference.name.len != 0) difference.name else difference.key;
     const aspect: ?[]const u8 = switch (difference.kind) {
         .record_missing, .record_extra => return difference.path,
@@ -721,7 +759,7 @@ fn orNone(text: []const u8) []const u8 {
 }
 
 // Drops the list levels, which add length but no meaning: spectrum/scanList/scan -> spectrum/scan.
-fn writeShortPath(out: *std.Io.Writer, path: []const u8) !void {
+pub fn writeShortPath(out: *std.Io.Writer, path: []const u8) !void {
     var parts = std.mem.splitScalar(u8, path, '/');
     var first = true;
     while (parts.next()) |part| {
@@ -832,7 +870,7 @@ test "[edge] - [view]: more records than the cap are refused with counts and key
     var out = std.Io.Writer.fixed(&buffer);
     var viewer = Viewer.init(std.testing.allocator, &out, .{}, .{});
     defer viewer.deinit();
-    viewer.records = 2;
+    viewer.tally.records = 2;
     const sink = viewer.sink();
     for ([_][]const u8{ "scan=1", "scan=2", "scan=3" }) |record| {
         try sink.emit(sink.context, .{

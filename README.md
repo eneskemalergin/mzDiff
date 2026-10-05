@@ -26,6 +26,7 @@ zig build test --summary all                             # self-contained tests;
 ./zig-out/bin/mzdiff --summary REFERENCE.mzML OTHER.mzML # one line: the verdict and its counts
 ./zig-out/bin/mzdiff --list REFERENCE.mzML OTHER.mzML    # every difference, in the order found
 ./zig-out/bin/mzdiff --view REFERENCE.mzML OTHER.mzML    # the differing records as a git-style diff
+./zig-out/bin/mzdiff --view --html A B > diff.html       # the same, as an interactive page to open
 tools/corpus.sh [-t mzbridge|opentfraw|mzdata] [RAW...]  # convert and compare the corpus, one file at a time
 tools/mutate.py zig-out/bin/mzdiff REFERENCE.mzML        # inject defects and check each one is caught
 ```
@@ -60,11 +61,22 @@ controllerType=0 controllerNumber=1 scan=5
   + quadrupole                                                    MAJOR only in B
 ```
 
+`--view --html` writes the view as one self-contained page: open it in any browser, with nothing fetched from the network. Each differing record is a collapsible section with A and B side by side (or unified, A above B), and the page has:
+
+- severity filters that count the differences they hide or show, and a search over keys, names, values, and record ids (`/`);
+- a layout switch (`u`), expand and collapse all (`e`, `c`), and `j`/`k` to step through the records;
+- tooltips for every key, severity, and kind of difference, and for values too long for their column;
+- the filters kept in the address (`diff.html#q=isolation&hide=minor&layout=unified`), so a link opens the same view;
+- light and dark themes from the system setting.
+
+Every value from the files is escaped, so a hostile mzML cannot put markup or script into the page, and the script only hides and shows. The page is built in a bounded buffer like the text view: past 500 records (`--limit N`) or 16 MB it becomes a page that says how large the view would be and how to narrow it. On the PRM pair against mzdata it costs no time over `--list` (106 ms against 105 ms, zebrac).
+
 Watching how two tools write the same file:
 
 ```bash
 mzdiff --view --severity major trfp.mzML tool.mzML                 # what matters, as a diff (refuses when too large)
 mzdiff --view --side-by-side --record ID trfp.mzML tool.mzML       # one spectrum, A and B in two columns
+mzdiff --view --html --severity major trfp.mzML tool.mzML > d.html # the same as a page to open and share
 mzdiff --list --severity major trfp.mzML tool.mzML                 # everything that matters, spectrum by spectrum
 mzdiff --list --key MS:1000512 trfp.mzML tool.mzML                 # how each filter string differs
 mzdiff --list --record "controllerType=0 controllerNumber=1 scan=5" trfp.mzML tool.mzML
