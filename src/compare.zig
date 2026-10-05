@@ -428,10 +428,18 @@ fn diffGroup(report: *Report, id: []const u8, a: []const Fact, b: []const Fact) 
         );
         return;
     }
-    for (a, b) |x, y| {
+    for (a, b) |x_unit, y_unit| {
+        var x = x_unit;
+        var y = y_unit;
         if (!std.mem.eql(u8, x.unit, y.unit)) {
-            try report.addDirty(null, .unit, x.path, x.key, x.name, id, orDash(x.unit), orDash(y.unit));
-            return;
+            if (x.unit.len != 0 and y.unit.len != 0) {
+                try report.addDirty(null, .unit, x.path, x.key, x.name, id, x.unit, y.unit);
+                return;
+            }
+            try report.add(oneSidedUnit(report, x.key, x.unit), .unit, x.path, x.key, x.name, id, orDash(x.unit), orDash(y.unit));
+            // With a unit on one side only, the values compare as printed, not converted.
+            x = asPrinted(x);
+            y = asPrinted(y);
         }
         switch (compareValues(report.ppm, x, y)) {
             .same => continue,
@@ -440,6 +448,21 @@ fn diffGroup(report: *Report, id: []const u8, a: []const Fact, b: []const Fact) 
         }
         return;
     }
+}
+
+// A unit on one side only leaves the value as it was. One B adds is minor (mzValidate judges
+// whether the term allows it); one B drops costs readers the unit, never more than major.
+fn oneSidedUnit(report: *Report, key: []const u8, unit_a: []const u8) Severity {
+    if (unit_a.len == 0) return .minor;
+    const level = report.rules.severity(key);
+    return if (level == .critical) .major else level;
+}
+
+fn asPrinted(fact: Fact) Fact {
+    var copy = fact;
+    if (copy.number) |number| copy.number = number / copy.scale;
+    copy.scale = 1;
+    return copy;
 }
 
 fn orDash(text: []const u8) []const u8 {
@@ -644,7 +667,8 @@ fn subtrees(
 fn sameSubtree(ppm: f64, a: []const Fact, b: []const Fact) bool {
     if (a.len != b.len) return false;
     for (a, b) |x, y| {
-        if (!sameGroup(x, y) or !std.mem.eql(u8, x.unit, y.unit)) return false;
+        if (!sameGroup(x, y)) return false;
+        if (x.unit.len != 0 and y.unit.len != 0 and !std.mem.eql(u8, x.unit, y.unit)) return false;
         if (compareValues(ppm, x, y) == .different) return false;
     }
     return true;
@@ -772,8 +796,10 @@ pub fn compareArrays(
                 x.values = try toMinutes(arena, x.values);
             } else if (std.mem.eql(u8, x.unit, MINUTE) and std.mem.eql(u8, y.unit, SECOND)) {
                 y.values = try toMinutes(arena, y.values);
+            } else if (x.unit.len == 0 or y.unit.len == 0) {
+                try report.add(oneSidedUnit(report, x.key, x.unit), .unit, path, x.key, "", id, orDash(x.unit), orDash(y.unit));
             } else {
-                try report.add(null, .unit, path, x.key, "", id, orDash(x.unit), orDash(y.unit));
+                try report.add(null, .unit, path, x.key, "", id, x.unit, y.unit);
                 continue;
             }
         }
