@@ -58,13 +58,15 @@ fn pairingKey(item: *const Item, kind: KeyKind) ![]const u8 {
 // Spectra of one side waiting for a partner with the same key, oldest first. Files in step keep
 // one waiting; `WINDOW` bounds the rest.
 const Pending = struct {
-    const Waiting = struct { item: Item, seq: u64 };
+    const Waiting = struct { item: Item, seq: u64, bytes: usize };
     const Entry = struct { key: []u8, seq: u64 };
 
     waiting: std.StringHashMapUnmanaged(Waiting) = .empty,
     // Arrival order; entries whose spectrum was paired since are dropped as they reach the head.
     queue: std.ArrayList(Entry) = .empty,
     head: usize = 0,
+    // What the waiting spectra hold, by their arenas' capacity.
+    bytes: usize = 0,
 
     fn contains(self: *const Pending, key: []const u8) bool {
         return self.waiting.contains(key);
@@ -79,13 +81,22 @@ const Pending = struct {
         errdefer allocator.free(owned);
         try self.queue.append(allocator, .{ .key = owned, .seq = seq });
         errdefer self.queue.items.len -= 1;
-        try self.waiting.put(allocator, owned, .{ .item = item, .seq = seq });
+        const bytes = item.arena.queryCapacity();
+        try self.waiting.put(allocator, owned, .{ .item = item, .seq = seq, .bytes = bytes });
+        self.bytes += bytes;
     }
 
     fn take(self: *Pending, allocator: std.mem.Allocator, key: []const u8) ?Item {
         const found = self.waiting.fetchRemove(key) orelse return null;
         self.trim(allocator);
+        self.bytes -= found.value.bytes;
         return found.value.item;
+    }
+
+    /// Whether the oldest waiting spectrum should give up: past `WINDOW` spectra, or past
+    /// `WINDOW_BYTES` with more than one waiting (the newest always waits for its partner).
+    fn full(self: *const Pending) bool {
+        return self.count() > WINDOW or (self.count() > 1 and self.bytes > WINDOW_BYTES);
     }
 
     fn oldest(self: *Pending, allocator: std.mem.Allocator) ?Item {
@@ -96,6 +107,7 @@ const Pending = struct {
         self.head += 1;
         allocator.free(entry.key);
         self.trim(allocator);
+        self.bytes -= found.value.bytes;
         return found.value.item;
     }
 
@@ -121,8 +133,11 @@ const Pending = struct {
     }
 };
 
-// Spectra waiting for a partner beyond this many on one side are reported missing or extra.
+// Spectra waiting for a partner beyond this many, or holding more than this much memory, on one
+// side are reported missing or extra, oldest first: however different two files are, the join
+// holds a bounded amount.
 const WINDOW = 1024;
+const WINDOW_BYTES = 64 << 20;
 
 pub const Counts = struct { spectra: usize = 0, chromatograms: usize = 0, stopped_early: bool = false };
 
@@ -186,7 +201,7 @@ pub fn run(allocator: std.mem.Allocator, report: *Report, a: *read.Stream, b: *r
                         item.free(allocator);
                         return err;
                     };
-                    while (entry[1].count() > WINDOW) {
+                    while (entry[1].full()) {
                         const old = entry[1].oldest(allocator).?;
                         defer old.free(allocator);
                         reportUnpaired(report, old, in_a) catch |err| return err;
