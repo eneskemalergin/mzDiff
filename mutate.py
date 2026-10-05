@@ -98,6 +98,9 @@ def array_unit(t):
     assert blk2 != blk
     return t[:a0] + blk2 + t[a1:]
 
+def mz_unit_dropped(t):
+    return first_in_spectrum(t, 5, 'name="m/z array" unitAccession="MS:1000040" unitName="m/z" unitCvRef="MS"', 'name="m/z array"')
+
 def default_len(t):
     a0, a1 = spectrum_block(t, 5)
     blk = t[a0:a1]
@@ -182,15 +185,17 @@ CASES = [
     ("chrom_type_change", chrom_type_change, "MS:1000628"),
     ("sst_unit_dropped", sst_unit_dropped, "MS:1000016"),
     ("sst_coarse", sst_coarse, "MS:1000016"),
-    ("unit_only_b", unit_only_b, "MS:1000511"),
     ("value_case", value_case, "MS:1000512"),
     ("ic_ref", ic_ref, "instrumentConfiguration"),
     ("array_unit", array_unit, "array:MS:1000515"),
+    ("mz_unit_dropped", mz_unit_dropped, "array:MS:1000514"),
     ("scan_id_format", scan_id_format, "id"),
     ("swap_precursor_charge", swap_precursor_charge, "MS:1000041"),
     ("swap_precursor_energy", swap_precursor_energy, "MS:1000045"),
     ("reorder_precursors", reorder_precursors, None),
-    # mzValidate checks these; mzdiff must stay quiet about them.
+    # mzValidate checks these (a unit the term does not allow, the index, the checksum); mzdiff
+    # must stay quiet about them, or file them as minor.
+    ("unit_only_b", unit_only_b, None),
     ("bad_index_offset", bad_index_offset, None),
     ("bad_checksum", bad_checksum, None),
     ("index_attr", index_attr, None),
