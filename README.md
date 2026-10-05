@@ -25,6 +25,7 @@ zig build test --summary all                             # self-contained tests;
 ./zig-out/bin/mzdiff REFERENCE.mzML OTHER.mzML           # report: difference classes, most severe first
 ./zig-out/bin/mzdiff --summary REFERENCE.mzML OTHER.mzML # one line: the verdict and its counts
 ./zig-out/bin/mzdiff --list REFERENCE.mzML OTHER.mzML    # every difference, in the order found
+./zig-out/bin/mzdiff --view REFERENCE.mzML OTHER.mzML    # the differing records as a git-style diff
 tools/corpus.sh [-t mzbridge|opentfraw|mzdata] [RAW...]  # convert and compare the corpus, one file at a time
 tools/mutate.py zig-out/bin/mzdiff REFERENCE.mzML        # inject defects and check each one is caught
 ```
@@ -35,14 +36,35 @@ Requires **Zig 0.16.0** and the zmz package (`../zmz`), which reads the mzML. `c
 
 Modes choose what is shown, formats choose how, and selection narrows it. None of them changes the verdict.
 
-- **Modes**, one at a time: the report by default (difference classes, most severe and most frequent first, with `--examples N` examples each); `--summary` (one line: the verdict and its counts); `--list` (every difference, one per line, in the order found, grouped under its record; an array that differs is one line with how many values differ and the largest difference); `-q`, `--quiet` (nothing; the exit status is the answer).
+- **Modes**, one at a time: the report by default (difference classes, most severe and most frequent first, with `--examples N` examples each); `--summary` (one line: the verdict and its counts); `--list` (every difference, one per line, in the order found, grouped under its record; an array that differs is one line with how many values differ and the largest difference); `--view` (the differing records as a git-style diff, below); `-q`, `--quiet` (nothing; the exit status is the answer).
 - **Formats**: text by default, colored under `--color auto|always|never` (`NO_COLOR` and `CLICOLOR_FORCE` are honored); `--json` (one document for the report and the summary, JSON Lines for `--list`, ending with a summary line); `--tsv` (the report's columns are stable for scripts).
 - **Selection**: `--severity LEVEL` shows that level and above; `--key KEY` and, with `--list`, `--record ID` keep only those keys and records (each repeatable); `--limit N` caps a list and says how much it held back.
 - **Verdict**: `same` (no difference), `tolerated` (nothing at or above `--fail-on`, default `major`), or `differs`; `incomplete` when `--max-spectra` stopped early. Exit status 0 for same or tolerated, 1 for differs, 2 for a usage error or an unreadable file.
 
+The view shows each differing record the way `git diff` shows a file: the record's native id, the element path, then `-` for A and `+` for B, with `~` where the difference is within a tolerance (rounding, 32-bit storage, ppm), each pair tagged with its severity. `--side-by-side` puts A and B in two columns (`--width N`, else `COLUMNS`, else 160). The view is built in a bounded buffer while the comparison runs: when more than `--limit` records differ (default 40) or the text passes 1 MB, it shows nothing and says instead how many records differ at each severity, which severity would narrow it, and the keys that differ in the most records, so the next command is obvious.
+
+```text
+$ mzdiff --view --severity major --record "controllerType=0 controllerNumber=1 scan=5" trfp.mzML mzdata.mzML
+controllerType=0 controllerNumber=1 scan=5
+  spectrum
+  - total ion current = 17442.453125                              MAJOR value differs
+  + total ion current = 17442.513671875
+  spectrum/precursor/isolationWindow
+  - isolation window lower offset = 0.7                           MAJOR value differs
+  + isolation window lower offset = 1.4000244
+  - isolation window upper offset = 0.7                           MAJOR value differs
+  + isolation window upper offset = 1.4000244
+  spectrum/precursor/selectedIon
+  + peak intensity = 0                                            MAJOR only in B
+  spectrum/scan/instrumentConfiguration/analyzer
+  + quadrupole                                                    MAJOR only in B
+```
+
 Watching how two tools write the same file:
 
 ```bash
+mzdiff --view --severity major trfp.mzML tool.mzML                 # what matters, as a diff (refuses when too large)
+mzdiff --view --side-by-side --record ID trfp.mzML tool.mzML       # one spectrum, A and B in two columns
 mzdiff --list --severity major trfp.mzML tool.mzML                 # everything that matters, spectrum by spectrum
 mzdiff --list --key MS:1000512 trfp.mzML tool.mzML                 # how each filter string differs
 mzdiff --list --record "controllerType=0 controllerNumber=1 scan=5" trfp.mzML tool.mzML
