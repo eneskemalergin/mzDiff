@@ -274,6 +274,18 @@ pub const Rules = struct {
         return true;
     }
 
+    /// The ancestor whose rule decides the severity of `key` (mass analyzer type, scan polarity, ...),
+    /// or null when no rule above the default applies.
+    pub fn category(self: *const Rules, key: []const u8) ?[]const u8 {
+        if (!std.mem.startsWith(u8, key, "MS:")) return null;
+        const vocabulary = self.vocabulary orelse return null;
+        for (ANCESTORS) |rule| {
+            if (rule[1] == .ignored) continue;
+            if (vocabulary.isA(key, rule[0], 10_000) catch false) return rule[0];
+        }
+        return null;
+    }
+
     /// The term's name in the bundled vocabulary, or null for unknown accessions.
     pub fn name(self: *const Rules, key: []const u8) ?[]const u8 {
         const accession = if (std.mem.startsWith(u8, key, "array:")) key["array:".len..] else key;

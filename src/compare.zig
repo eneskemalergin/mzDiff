@@ -39,6 +39,8 @@ pub const Kind = enum {
     regrouped,
     order,
     element_order,
+    term,
+    specific,
 
     pub fn label(self: Kind) []const u8 {
         return switch (self) {
@@ -62,6 +64,8 @@ pub const Kind = enum {
             .regrouped => "values regrouped",
             .order => "records out of order",
             .element_order => "in another order",
+            .term => "another term",
+            .specific => "a more specific term",
         };
     }
 };
@@ -129,6 +133,10 @@ pub const Report = struct {
     // Scratch for `sortFacts`, reused across records.
     runs: std.ArrayList(Run) = .empty,
     reordered: std.ArrayList(Fact) = .empty,
+    // `diffFacts` scratch: groups on one side only, and the terms paired between them.
+    only_a: std.ArrayList(usize) = .empty,
+    only_b: std.ArrayList(usize) = .empty,
+    terms: std.ArrayList(TermPair) = .empty,
     /// Sees every difference before it is filed, for `--list`.
     sink: ?Sink = null,
 
@@ -156,6 +164,9 @@ pub const Report = struct {
         self.dirty.deinit(self.allocator);
         self.runs.deinit(self.allocator);
         self.reordered.deinit(self.allocator);
+        self.only_a.deinit(self.allocator);
+        self.only_b.deinit(self.allocator);
+        self.terms.deinit(self.allocator);
     }
 
     /// Like `add`, and marks the path as holding a real difference in this record.
@@ -521,6 +532,7 @@ pub fn diffFacts(report: *Report, id: []const u8, a: []Fact, b: []Fact) !void {
     report.dirty.clearRetainingCapacity();
     try sortFacts(report, a);
     try sortFacts(report, b);
+    try pairTerms(report, a, b);
     var i: usize = 0;
     var j: usize = 0;
     while (i < a.len or j < b.len) {
@@ -528,11 +540,21 @@ pub fn diffFacts(report: *Report, id: []const u8, a: []Fact, b: []Fact) !void {
         const take_b = i == a.len or (j < b.len and groupLess(b[j], a[i]));
         if (take_a) {
             const end = groupEnd(a, i);
-            try report.addDirty(null, .missing, a[i].path, a[i].key, a[i].name, id, a[i].text, "");
+            if (partnerOf(report, i)) |pair| {
+                const x = a[i];
+                const y = b[pair.b];
+                // One term in place of another: a more specific one costs nothing, any other has
+                // the severity of what both name (`--set` on A's term still wins).
+                const severity: ?Severity = if (pair.specific) .minor else null;
+                try report.addDirty(severity, if (pair.specific) .specific else .term, x.path, x.key, report.rules.name(pair.category) orelse "", id, orKey(x), orKey(y));
+            } else try report.addDirty(null, .missing, a[i].path, a[i].key, a[i].name, id, a[i].text, "");
             i = end;
         } else if (take_b) {
             const end = groupEnd(b, j);
-            try report.addDirty(null, .extra, b[j].path, b[j].key, b[j].name, id, "", b[j].text);
+            const paired = for (report.terms.items) |pair| {
+                if (pair.b == j) break true;
+            } else false;
+            if (!paired) try report.addDirty(null, .extra, b[j].path, b[j].key, b[j].name, id, "", b[j].text);
             j = end;
         } else {
             const end_a = groupEnd(a, i);
@@ -542,6 +564,58 @@ pub fn diffFacts(report: *Report, id: []const u8, a: []Fact, b: []Fact) !void {
             j = end_b;
         }
     }
+}
+
+const TermPair = struct { a: usize, b: usize, category: []const u8, specific: bool };
+
+// Pairs the terms without a value found on one side only, at the same element and in the same
+// category of the vocabulary (two analyzers, two polarities): one term written in place of the
+// other reads as one difference, not a missing and an extra. Each term pairs at most once, the
+// first in key order.
+fn pairTerms(report: *Report, a: []const Fact, b: []const Fact) !void {
+    report.terms.clearRetainingCapacity();
+    report.only_a.clearRetainingCapacity();
+    report.only_b.clearRetainingCapacity();
+    var i: usize = 0;
+    var j: usize = 0;
+    while (i < a.len or j < b.len) {
+        const take_a = j == b.len or (i < a.len and groupLess(a[i], b[j]));
+        const take_b = i == a.len or (j < b.len and groupLess(b[j], a[i]));
+        if (take_a) {
+            if (a[i].text.len == 0) try report.only_a.append(report.allocator, i);
+            i = groupEnd(a, i);
+        } else if (take_b) {
+            if (b[j].text.len == 0) try report.only_b.append(report.allocator, j);
+            j = groupEnd(b, j);
+        } else {
+            i = groupEnd(a, i);
+            j = groupEnd(b, j);
+        }
+    }
+    if (report.only_a.items.len == 0 or report.only_b.items.len == 0) return;
+    for (report.only_a.items) |x| {
+        const category = report.rules.category(a[x].key) orelse continue;
+        for (report.only_b.items) |y| {
+            if (!sameText(a[x].path, b[y].path)) continue;
+            const taken = for (report.terms.items) |pair| {
+                if (pair.b == y) break true;
+            } else false;
+            if (taken) continue;
+            const other = report.rules.category(b[y].key) orelse continue;
+            if (!std.mem.eql(u8, category, other)) continue;
+            try report.terms.append(report.allocator, .{ .a = x, .b = y, .category = category, .specific = report.rules.isA(b[y].key, a[x].key) });
+            break;
+        }
+    }
+}
+
+fn partnerOf(report: *const Report, i: usize) ?TermPair {
+    for (report.terms.items) |pair| if (pair.a == i) return pair;
+    return null;
+}
+
+fn orKey(fact: Fact) []const u8 {
+    return if (fact.name.len != 0) fact.name else fact.key;
 }
 
 /// Sorts and drops exact repeats (same path, key, value, unit): header facts compare as a set,
@@ -1726,6 +1800,40 @@ test "[unit] - [regrouping]: precursors in another order are reported, once" {
 test "[unit] - [form]: integers are an optional sign and digits only" {
     for ([_][]const u8{ "2", "+2", "-3", " 17 ", "0" }) |text| try std.testing.expect(integerSpelling(text));
     for ([_][]const u8{ "2.0", "2e0", "", "+", "two", "0x2" }) |text| try std.testing.expect(!integerSpelling(text));
+}
+
+test "[unit] - [facts]: a term in place of another of the same kind is one difference" {
+    const allocator = std.testing.allocator;
+    var rules = Rules.init(allocator);
+    defer rules.deinit();
+    const path = "spectrum/scanList/scan/instrumentConfiguration/componentList/analyzer";
+    const cases = [_]struct { a: []const u8, b: []const u8, kinds: []const Kind, severity: Severity }{
+        // FT-ICR against orbitrap: two analyzers.
+        .{ .a = "MS:1000079", .b = "MS:1000484", .kinds = &.{.term}, .severity = .major },
+        // ion trap against radial ejection linear ion trap, a kind of ion trap.
+        .{ .a = "MS:1000264", .b = "MS:1000083", .kinds = &.{.specific}, .severity = .minor },
+        // positive against negative scan.
+        .{ .a = "MS:1000130", .b = "MS:1000129", .kinds = &.{.term}, .severity = .critical },
+        // An analyzer against a detector (inductive detector) are not one thing written two ways.
+        .{ .a = "MS:1000079", .b = "MS:1000624", .kinds = &.{ .missing, .extra }, .severity = .major },
+    };
+    for (cases) |case| {
+        var report = Report.init(allocator, &rules, 3);
+        defer report.deinit();
+        var a = [_]Fact{makeFact(path, case.a, "", "", "", 0)};
+        var b = [_]Fact{makeFact(path, case.b, "", "", "", 0)};
+        try diffFacts(&report, "scan=1", &a, &b);
+        const classes = try report.sorted(allocator);
+        defer allocator.free(classes);
+        try std.testing.expectEqual(case.kinds.len, classes.len);
+        for (classes) |class| {
+            const known = for (case.kinds) |kind| {
+                if (kind == class.kind) break true;
+            } else false;
+            try std.testing.expect(known);
+        }
+        try std.testing.expectEqual(case.severity, classes[0].severity);
+    }
 }
 
 test "[edge] - [report]: clipped examples end on a character boundary" {

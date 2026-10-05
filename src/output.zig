@@ -675,6 +675,7 @@ pub fn describe(buffer: []u8, difference: Difference) []const u8 {
         .precision => "precision",
         .regrouped => "grouping",
         .element_order => "order",
+        .term, .specific => "term",
         else => null,
     };
     return if (aspect) |what| std.fmt.bufPrint(buffer, "{s} ({s})", .{ name, what }) catch name else name;

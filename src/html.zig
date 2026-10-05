@@ -348,6 +348,8 @@ fn kindMeaning(kind: Kind) []const u8 {
         .regrouped => "values moved between repeated elements such as two precursors",
         .order => "this spectrum sits in another place in B than in A",
         .element_order => "the same precursors in another order; readers take the first",
+        .term => "B names another term of the same kind (another analyzer, polarity, or method)",
+        .specific => "B names a narrower term than A: a descendant of it in the vocabulary",
     };
 }
 

@@ -3,8 +3,8 @@
 
 usage: tools/mutate.py MZDIFF REFERENCE.mzML [CASE...]
 
-Each case names the key of the critical or major class it must raise, `exit 2` when the file must
-fail to read, `minor:KIND` when it must raise that minor kind and nothing more serious (a
+Each case names the key of the critical or major class it must raise (`KEY (KIND)` when the kind
+matters too), `exit 2` when the file must fail to read, `minor:KIND` when it must raise that minor kind and nothing more serious (a
 tolerance at work), or nothing when B must compare exactly the same (a non-defect, or a defect
 mzValidate owns).
 An edit that shifts bytes also breaks the index offset; that `indexListOffset` class is ignored
@@ -256,6 +256,30 @@ def ms_level_in_group(t):
     blk = blk[:line.start()] + '          <referenceableParamGroupRef ref="mutateMsLevel" />\n' + blk[line.end():]
     return t[:a0] + blk + t[a1:]
 
+# One term in place of another of the same kind: one difference, not a missing and an extra.
+
+def analyzer_swapped(t):
+    old = '<cvParam cvRef="MS" accession="MS:1000484" value="" name="orbitrap" />'
+    if old not in t:
+        raise Skip("the header's analyzer is not orbitrap")
+    return t.replace(old, '<cvParam cvRef="MS" accession="MS:1000079" value="" name="fourier transform ion cyclotron resonance mass spectrometer" />', 1)
+
+HCD = 'accession="MS:1000422" value="" name="beam-type collision-induced dissociation"'
+
+def single_precursor(t, scan):
+    a0, a1 = spectrum_block(t, scan)
+    if '<precursorList count="1">' not in t[a0:a1]:
+        raise Skip(f"scan {scan} has not exactly one precursor")
+
+def activation_swapped(t):
+    single_precursor(t, 5)
+    return first_in_spectrum(t, 5, HCD, 'accession="MS:1000598" value="" name="electron transfer dissociation"')
+
+def activation_narrowed(t):
+    # Supplemental beam-type CID is a kind of beam-type CID: more specific, not other.
+    single_precursor(t, 5)
+    return first_in_spectrum(t, 5, HCD, 'accession="MS:1002678" value="" name="supplemental beam-type collision-induced dissociation"')
+
 # Form: the same data written so some readers fail. mzdiff must report it itself, not leave it
 # to mzValidate.
 
@@ -385,6 +409,9 @@ CASES = [
     ("same_seconds", same_seconds, None),
     ("ms_level_in_group", ms_level_in_group, "form:paramGroup"),
     ("charge_spelled", charge_spelled, "form:integer"),
+    ("analyzer_swapped", analyzer_swapped, "MS:1000484 (term)"),
+    ("activation_swapped", activation_swapped, "MS:1000422 (term)"),
+    ("activation_narrowed", activation_narrowed, "minor:specific"),
     ("mz_numpress", mz_numpress, "form:numpress"),
     ("same_uncompressed", same_uncompressed, None),
     ("same_float32", same_float32, "minor:precision"),
@@ -429,6 +456,7 @@ try:
         if expect != "indexListOffset":
             rows = [r for r in rows if r[4] != "indexListOffset"]
         serious = {r[4] for r in rows if r[0] in ("critical", "major")}
+        kinded = {f"{r[4]} ({r[1]})" for r in rows if r[0] in ("critical", "major")}
         minor = {r[1] for r in rows if r[0] == "minor"}
         if expect == EXIT2:
             ok = run.returncode == 2
@@ -436,6 +464,8 @@ try:
             ok = run.returncode in (0, 1) and not rows
         elif expect.startswith("minor:"):
             ok = run.returncode in (0, 1) and not serious and expect[len("minor:"):] in minor
+        elif expect.endswith(")"):
+            ok = expect in kinded
         else:
             ok = expect in serious
         failed += not ok
