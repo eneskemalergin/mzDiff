@@ -1,0 +1,26 @@
+# Zig build artifacts
+zig-out/
+zig-cache/
+.zig-cache/
+.zig-global-cache/
+zig-pkg/
+
+# Local Zig installation (download separately)
+zig-*/
+
+# Local zig wrapper (uses project-local zig installation)
+/zig
+
+# Editor
+.vscode/
+*.swp
+*~
+
+# Python
+__pycache__/
+*.pyc
+
+# Ignored folders (dev only)
+tmp/
+plan/
+experiments/

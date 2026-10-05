@@ -1,0 +1,14 @@
+.{
+    .name = .mzdiff,
+    .version = "0.1.0",
+    .fingerprint = 0xd2feddfee05e857a,
+    .minimum_zig_version = "0.16.0",
+    .dependencies = .{
+        .zmz = .{ .path = "../zmz" },
+    },
+    .paths = .{
+        "build.zig",
+        "build.zig.zon",
+        "src",
+    },
+}
