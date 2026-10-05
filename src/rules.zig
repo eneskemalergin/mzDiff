@@ -90,6 +90,8 @@ const EXACT = std.StaticStringMap(Severity).initComptime(.{
     .{ "@spectrumRef", .major },
     // spectra paired out of their files' order
     .{ "order", .major },
+    // a spectrum's precursors in another order: the first is the one readers take
+    .{ "precursorOrder", .major },
     // the native id of spectra paired by scan number
     .{ "id", .major },
     // the indexedmzML wrapper, present or not

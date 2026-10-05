@@ -3,7 +3,8 @@
 //! Each side becomes a list of facts: (element path, key, value, unit) for every attribute,
 //! cvParam, and userParam, with group references expanded. Facts are sorted and compared per
 //! (path, key), so parameter order, attribute order, whitespace, number spelling ("50" and
-//! "50.000"), and the order of repeated elements do not matter. Scan times in seconds are compared
+//! "50.000"), and the order of repeated elements do not matter, except a spectrum's precursors,
+//! whose order says which stage each one is. Scan times in seconds are compared
 //! in minutes. Arrays are compared as decoded values, at 32-bit precision when either side stores
 //! 32 bits. Every difference is filed under a class (severity, kind, path, key) in a `Report`.
 
@@ -37,6 +38,7 @@ pub const Kind = enum {
     id_mismatch,
     regrouped,
     order,
+    element_order,
 
     pub fn label(self: Kind) []const u8 {
         return switch (self) {
@@ -59,6 +61,7 @@ pub const Kind = enum {
             .id_mismatch => "paired ids differ",
             .regrouped => "values regrouped",
             .order => "records out of order",
+            .element_order => "in another order",
         };
     }
 };
@@ -783,12 +786,25 @@ pub fn diffGrouping(
         const index = try scratch.alloc(Hashed, groups_b.len);
         for (groups_b, index, 0..) |group, *entry, at| entry.* = .{ .hash = subtreeHash(group.items), .at = at };
         std.mem.sortUnstable(Hashed, index, {}, Hashed.less);
+        var moved = false;
+        var unmatched: ?usize = null;
         for (groups_a, 0..) |group, position_a| {
-            if (matchExact(report.ppm, group.items, groups_b, index, taken)) continue;
-            if (matchNear(report.ppm, group.items, groups_b, taken, position_a)) continue;
-            try reportRegrouped(report, scratch, id, element.path, group.items, groups_b, taken);
+            const at = matchExact(report.ppm, group.items, groups_b, index, taken) orelse
+                matchNear(report.ppm, group.items, groups_b, taken, position_a) orelse {
+                unmatched = position_a;
+                break;
+            };
+            moved = moved or at != position_a;
+        }
+        if (unmatched) |position_a| {
+            try reportRegrouped(report, scratch, id, element.path, groups_a[position_a].items, groups_b, taken);
             try filed.append(scratch, element.path);
-            break;
+        } else if (moved and ordered(element.path)) {
+            // The same elements in another order, where the order carries meaning: shown by the
+            // m/z of the first one on each side, the one a reader takes.
+            const first_a = try firstMz(scratch, groups_a[0].items);
+            const first_b = try firstMz(scratch, groups_b[0].items);
+            try report.add(null, .element_order, element.path, "precursorOrder", "precursors", id, first_a, first_b);
         }
     }
     for (elements_b, 0..) |element, position| {
@@ -820,7 +836,7 @@ fn subtreeHash(facts: []const Fact) u64 {
     return hasher.final();
 }
 
-fn matchExact(ppm: f64, group: []const Fact, groups: []const std.ArrayList(Fact), index: []const Hashed, taken: []bool) bool {
+fn matchExact(ppm: f64, group: []const Fact, groups: []const std.ArrayList(Fact), index: []const Hashed, taken: []bool) ?usize {
     const hash = subtreeHash(group);
     var low: usize = 0;
     var high: usize = index.len;
@@ -832,9 +848,9 @@ fn matchExact(ppm: f64, group: []const Fact, groups: []const std.ArrayList(Fact)
         const at = index[low].at;
         if (taken[at] or !sameSubtree(ppm, group, groups[at].items)) continue;
         taken[at] = true;
-        return true;
+        return at;
     }
-    return false;
+    return null;
 }
 
 // Elements of B that match only within a tolerance this many places either side of the same
@@ -842,7 +858,7 @@ fn matchExact(ppm: f64, group: []const Fact, groups: []const std.ArrayList(Fact)
 // linear however many elements repeat.
 const NEAR = 512;
 
-fn matchNear(ppm: f64, group: []const Fact, groups: []const std.ArrayList(Fact), taken: []bool, position: usize) bool {
+fn matchNear(ppm: f64, group: []const Fact, groups: []const std.ArrayList(Fact), taken: []bool, position: usize) ?usize {
     var distance: usize = 0;
     while (distance <= NEAR) : (distance += 1) {
         const before: ?usize = if (position >= distance) position - distance else null;
@@ -851,10 +867,21 @@ fn matchNear(ppm: f64, group: []const Fact, groups: []const std.ArrayList(Fact),
             const at = candidate orelse continue;
             if (at >= groups.len or taken[at] or !sameSubtree(ppm, group, groups[at].items)) continue;
             taken[at] = true;
-            return true;
+            return at;
         }
     }
-    return false;
+    return null;
+}
+
+fn firstMz(scratch: std.mem.Allocator, facts: []const Fact) ![]const u8 {
+    for (facts) |fact| if (std.mem.eql(u8, fact.key, "MS:1000744")) return std.fmt.allocPrint(scratch, "first at m/z {s}", .{fact.text});
+    return "";
+}
+
+// Repeated elements whose order carries meaning: a spectrum's precursors run from the nearest
+// stage back, and readers take the first as the precursor of the spectrum.
+fn ordered(path: []const u8) bool {
+    return std.mem.eql(u8, path, "spectrum/precursorList/precursor");
 }
 
 fn under(paths: []const []const u8, path: []const u8) bool {
@@ -1578,6 +1605,42 @@ test "[edge] - [regrouping]: the same elements in another order are not regroupe
     try diffFacts(&report, "scan=1", &a, &b);
     try diffGrouping(&report, scratch.allocator(), "scan=1", &a, &elements, &b, &elements);
     try std.testing.expectEqual(@as(usize, 0), report.classes.count());
+}
+
+test "[unit] - [regrouping]: precursors in another order are reported, once" {
+    const allocator = std.testing.allocator;
+    var rules = Rules.init(allocator);
+    defer rules.deinit();
+    var report = Report.init(allocator, &rules, 3);
+    defer report.deinit();
+    var scratch = std.heap.ArenaAllocator.init(allocator);
+    defer scratch.deinit();
+    const precursor = "spectrum/precursorList/precursor";
+    const ion = "spectrum/precursorList/precursor/selectedIonList/selectedIon";
+    const elements = [_]Element{
+        .{ .path = "spectrum", .parent = NO_PARENT },
+        .{ .path = precursor, .parent = 0 },
+        .{ .path = ion, .parent = 1 },
+        .{ .path = precursor, .parent = 0 },
+        .{ .path = ion, .parent = 3 },
+    };
+    var a = [_]Fact{
+        makeFact(ion, "MS:1000744", "", "641.29", "", 2), makeFact(ion, "MS:1000041", "", "2", "", 2),
+        makeFact(ion, "MS:1000744", "", "427.53", "", 4), makeFact(ion, "MS:1000041", "", "3", "", 4),
+    };
+    // The MS1 precursor first: a reader taking the first precursor gets 427.53 at charge 3.
+    var b = [_]Fact{
+        makeFact(ion, "MS:1000744", "", "427.53", "", 2), makeFact(ion, "MS:1000041", "", "3", "", 2),
+        makeFact(ion, "MS:1000744", "", "641.29", "", 4), makeFact(ion, "MS:1000041", "", "2", "", 4),
+    };
+    try diffFacts(&report, "scan=1", &a, &b);
+    try diffGrouping(&report, scratch.allocator(), "scan=1", &a, &elements, &b, &elements);
+    const classes = try report.sorted(allocator);
+    defer allocator.free(classes);
+    try std.testing.expectEqual(@as(usize, 1), classes.len);
+    try std.testing.expectEqual(Kind.element_order, classes[0].kind);
+    try std.testing.expectEqual(Severity.major, classes[0].severity);
+    try std.testing.expectEqualStrings("precursorOrder", classes[0].key);
 }
 
 test "[edge] - [report]: clipped examples end on a character boundary" {

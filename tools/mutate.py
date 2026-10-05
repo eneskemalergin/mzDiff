@@ -336,7 +336,7 @@ CASES = [
     ("scan_id_format", scan_id_format, "@id"),
     ("swap_precursor_charge", swap_precursor_charge, "MS:1000041"),
     ("swap_precursor_energy", swap_precursor_energy, "MS:1000045"),
-    ("reorder_precursors", reorder_precursors, None),
+    ("reorder_precursors", reorder_precursors, "precursorOrder"),
     # Meaning-preserving edits.
     ("same_param_order", same_param_order, None),
     ("same_attribute_order", same_attribute_order, None),

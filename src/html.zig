@@ -347,6 +347,7 @@ fn kindMeaning(kind: Kind) []const u8 {
         .id_mismatch => "spectra paired by scan number carry different native ids",
         .regrouped => "values moved between repeated elements such as two precursors",
         .order => "this spectrum sits in another place in B than in A",
+        .element_order => "the same precursors in another order; readers take the first",
     };
 }
 
