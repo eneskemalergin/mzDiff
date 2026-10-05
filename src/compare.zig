@@ -604,6 +604,15 @@ fn groupEnd(facts: []const Fact, start: usize) usize {
     return end;
 }
 
+// A total ion current of zero where A has one: readers take it for an empty spectrum and skip it
+// (Sage drops the spectrum without a word), so the spectrum is lost to them, not just a value.
+fn emptied(x: Fact, y: Fact) ?Severity {
+    if (!std.mem.eql(u8, x.key, "MS:1000285")) return null;
+    const p = x.number orelse return null;
+    const q = y.number orelse return null;
+    return if (q == 0 and p != 0) .critical else null;
+}
+
 fn diffGroup(report: *Report, id: []const u8, a: []const Fact, b: []const Fact) !void {
     const first = a[0];
     if (a.len != b.len) {
@@ -636,7 +645,7 @@ fn diffGroup(report: *Report, id: []const u8, a: []const Fact, b: []const Fact) 
         }
         switch (compareValues(report.ppm, x, y)) {
             .same => {},
-            .different => try report.addDirty(null, .value, x.path, x.key, x.name, id, x.text, y.text),
+            .different => try report.addDirty(emptied(x, y), .value, x.path, x.key, x.name, id, x.text, y.text),
             inline else => |kind| try report.add(.minor, @field(Kind, @tagName(kind)), x.path, x.key, x.name, id, x.text, y.text),
         }
     }
@@ -1490,6 +1499,28 @@ test "[unit] - [facts]: a unit b drops is at most major, except a time's, and on
         defer allocator.free(classes);
         try std.testing.expectEqual(@as(usize, 1), classes.len);
         try std.testing.expectEqual(Kind.unit, classes[0].kind);
+        try std.testing.expectEqual(case.severity, classes[0].severity);
+    }
+}
+
+test "[unit] - [facts]: a total ion current that drops to zero is critical, other changes major" {
+    const allocator = std.testing.allocator;
+    var rules = Rules.init(allocator);
+    defer rules.deinit();
+    const cases = [_]struct { b: []const u8, severity: Severity }{
+        .{ .b = "0", .severity = .critical },
+        .{ .b = "0.0", .severity = .critical },
+        .{ .b = "1492781.9", .severity = .major },
+    };
+    for (cases) |case| {
+        var report = Report.init(allocator, &rules, 3);
+        defer report.deinit();
+        var a = [_]Fact{makeFact("spectrum", "MS:1000285", "", "746390.94", "", 0)};
+        var b = [_]Fact{makeFact("spectrum", "MS:1000285", "", case.b, "", 0)};
+        try diffFacts(&report, "scan=1", &a, &b);
+        const classes = try report.sorted(allocator);
+        defer allocator.free(classes);
+        try std.testing.expectEqual(@as(usize, 1), classes.len);
         try std.testing.expectEqual(case.severity, classes[0].severity);
     }
 }

@@ -233,6 +233,10 @@ def param_value(t, scan, accession, change):
         raise Skip(f"scan {scan} has no {accession}")
     return t[:a0] + blk[:m.start(1)] + change(m.group(1)) + blk[m.end(1):] + t[a1:]
 
+def tic_zero(t):
+    # Readers take a zero total ion current for an empty spectrum; Sage drops the spectrum.
+    return param_value(t, 5, "MS:1000285", lambda v: "0")
+
 # Meaning-preserving edits: mzdiff must report nothing above minor.
 
 def same_param_order(t):
@@ -327,6 +331,7 @@ CASES = [
     ("chrom_time_unit", chrom_time_unit, "array:MS:1000595"),
     ("chrom_type_change", chrom_type_change, "MS:1000628"),
     ("sst_unit_dropped", sst_unit_dropped, "MS:1000016"),
+    ("tic_zero", tic_zero, "MS:1000285"),
     ("sst_coarse", sst_coarse, "MS:1000016"),
     ("value_case", value_case, "MS:1000512"),
     ("ic_ref", ic_ref, "instrumentConfiguration"),
