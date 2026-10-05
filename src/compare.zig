@@ -1080,19 +1080,29 @@ test "[edge] - [values]: seconds read as minutes keep the precision they were pr
     try std.testing.expect(compareValues(1, a, c) != .different);
 }
 
-test "[unit] - [facts]: a unit on one side only is a difference" {
+test "[unit] - [facts]: a unit b drops is at most major and one b adds is minor" {
     const allocator = std.testing.allocator;
     var rules = Rules.init(allocator);
     defer rules.deinit();
-    var report = Report.init(allocator, &rules, 3);
-    defer report.deinit();
-    var a = [_]Fact{makeFact("spectrum/scan", "MS:1000016", "", "1.5", MINUTE, 0)};
-    var b = [_]Fact{makeFact("spectrum/scan", "MS:1000016", "", "1.5", "", 0)};
-    try diffFacts(&report, "scan=1", &a, &b);
-    const classes = try report.sorted(allocator);
-    defer allocator.free(classes);
-    try std.testing.expectEqual(@as(usize, 1), classes.len);
-    try std.testing.expectEqual(Kind.unit, classes[0].kind);
+    // Scan start time is critical, so a dropped unit shows the cap; the value itself matches.
+    const cases = [_]struct { a: []const u8, b: []const u8, severity: Severity }{
+        .{ .a = MINUTE, .b = "", .severity = .major },
+        .{ .a = "", .b = MINUTE, .severity = .minor },
+        // In seconds on one side only, the printed values still match.
+        .{ .a = SECOND, .b = "", .severity = .major },
+    };
+    for (cases) |case| {
+        var report = Report.init(allocator, &rules, 3);
+        defer report.deinit();
+        var a = [_]Fact{makeFact("spectrum/scan", "MS:1000016", "", "1.5", case.a, 0)};
+        var b = [_]Fact{makeFact("spectrum/scan", "MS:1000016", "", "1.5", case.b, 0)};
+        try diffFacts(&report, "scan=1", &a, &b);
+        const classes = try report.sorted(allocator);
+        defer allocator.free(classes);
+        try std.testing.expectEqual(@as(usize, 1), classes.len);
+        try std.testing.expectEqual(Kind.unit, classes[0].kind);
+        try std.testing.expectEqual(case.severity, classes[0].severity);
+    }
 }
 
 test "[unit] - [regrouping]: values that trade places between repeated elements are found" {
