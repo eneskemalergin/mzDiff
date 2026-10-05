@@ -54,7 +54,7 @@ JSON schema 1 carries `schema_version`, both sides (`path`, `software`, `spectra
 
 ## What it compares
 
-- **Spectra**, paired by scan number from the native id (by position when a file has none). A spectrum on one side only is reported once; it does not shift the pairs after it. Paired spectra must carry the same native id. A spectrum without a scan number, or with one not above the previous spectrum's, is reported (`records out of order`), since pairing relies on it.
+- **Spectra**, paired by their native id in any vendor's format (Thermo, Waters, Sciex, Bruker, or a mix), by the scan number when the two files write different id formats, or by position when neither works. Pairing needs no order: a spectrum on one side only is reported once (`record missing in B`, `record only in B`), a spectrum in another place pairs anyway and is reported as `records out of order`, and the pairs around both stay correct. Memory stays bounded: beyond 1,024 spectra waiting for a partner, the oldest are reported missing.
 - **Chromatograms**, paired by type and id, then by type alone, then by id alone, so many SRM traces of one type pair by id rather than by position.
 - **The header**: file content, source file checksum, instrument configurations (model, serial, source, analyzer, detector), run start time. Header facts compare as a set.
 - **Every attribute, cvParam, and userParam**, with group references expanded, per element path, with its unit. A unit B drops is a difference, at most major since the value is intact; a unit B adds is minor, and whether the term allows it is mzValidate's check.
@@ -79,8 +79,8 @@ Differences that remain but carry no meaning are kept as **minor**:
 
 `src/rules.zig` decides, by exact key first, then by ancestry in the bundled PSI-MS vocabulary.
 
-- **critical**: peaks (m/z, intensity, time arrays), MS level, polarity, centroid or profile, spectrum type, scan start time, isolation target, selected ion m/z, charge, the activation method (any dissociation method term), the instrument model, a spectrum present on one side only, spectra out of scan order.
-- **major**: isolation offsets, collision and supplemental energies, filter string, injection time, scan window, TIC, base peak, lowest and highest m/z, FAIMS voltage, selected-ion intensity, `spectrumRef`, source SHA-1, serial number, analyzer, ionization and detector terms (also per scan), chromatogram type, start time, file content, chromatograms present on one side only, the native id of paired spectra (`id`), the index trailer (`indexed`, `indexListOffset`).
+- **critical**: peaks (m/z, intensity, time arrays), MS level, polarity, centroid or profile, spectrum type, scan start time, isolation target, selected ion m/z, charge, the activation method (any dissociation method term), the instrument model, a spectrum present on one side only.
+- **major**: isolation offsets, collision and supplemental energies, filter string, injection time, scan window, TIC, base peak, lowest and highest m/z, FAIMS voltage, selected-ion intensity, `spectrumRef`, source SHA-1, serial number, analyzer, ionization and detector terms (also per scan), chromatogram type, start time, file content, chromatograms present on one side only, spectra out of their files' order (`order`), the native id of spectra paired by scan number (`id`), the index trailer (`indexed`, `indexListOffset`).
 - **minor**: everything else, including unknown terms and user parameters.
 
 `--set KEY=LEVEL` overrides one key: `MS:1000512=minor`, `user:NAME=ignored`, `@spectrumRef=minor`, `array:MS:1000515=major`.

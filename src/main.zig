@@ -1,9 +1,9 @@
 //! mzdiff: compares two mzML files by what they mean, fast, in one forward pass over both.
 //!
 //! A is the reference (usually TRFP's mzML next to the .raw), B the output under test. Spectra
-//! pair by scan number (`scan=N` in the native id; by position when either file lacks it), so a
-//! spectrum missing on one side is reported once instead of shifting every later comparison;
-//! paired spectra must share the native id, and scan numbers must rise. Chromatograms pair by
+//! pair by native id in any vendor's format (by scan number when the formats differ, by position
+//! when neither works) through a bounded join that needs no order, so a spectrum missing or moved
+//! on one side is reported once and the pairs around it stay correct. Chromatograms pair by
 //! type and id, then type, then id. The headers are compared too, without the parts that differ
 //! between tools by design (cvList, softwareList, dataProcessingList, ids, file locations), and
 //! an indexed file's trailer must be complete.
@@ -389,8 +389,8 @@ const Item = struct {
     arena: *std.heap.ArenaAllocator,
     owner: *Side,
     used: bool = false,
-    // Pairing by scan number, this spectrum has none, or one not above the previous spectrum's.
-    out_of_order: bool = false,
+    // Which spectrum of its file this is (1 for the first); 0 for a chromatogram.
+    position: usize = 0,
 
     fn free(self: *const Item, allocator: std.mem.Allocator) void {
         _ = allocator;
@@ -557,8 +557,6 @@ const Stream = struct {
     io: std.Io,
     current: ?Item = null,
     position: usize = 0,
-    by_scan: bool = false,
-    previous_scan: ?u64 = null,
 
     fn advance(self: *Stream) void {
         self.current = self.side.queue.getOne(self.io) catch null;
@@ -566,11 +564,7 @@ const Stream = struct {
             .spectrum => {
                 self.side.spectra += 1;
                 self.position += 1;
-                if (self.by_scan) {
-                    const previous = self.previous_scan;
-                    item.out_of_order = item.scan == null or (previous != null and item.scan.? <= previous.?);
-                    if (item.scan) |scan| self.previous_scan = scan;
-                }
+                item.position = self.position;
             },
             .chromatogram => self.side.chromatograms += 1,
             else => {},
@@ -587,11 +581,118 @@ const Stream = struct {
     fn isSpectrum(self: *const Stream) bool {
         return if (self.current) |item| item.kind == .spectrum else false;
     }
+};
 
-    fn key(self: *const Stream, by_scan: bool) u64 {
-        return if (by_scan) self.current.?.scan orelse self.position else self.position;
+// How spectra pair: by the whole native id when both files use the same id fields (any vendor's
+// format), by the scan number when the formats differ but both have one, else by position.
+const KeyKind = enum { id, scan, position };
+
+fn keyKind(a: ?Item, b: ?Item) KeyKind {
+    const x = a orelse return .position;
+    const y = b orelse return .position;
+    if (x.kind != .spectrum or y.kind != .spectrum) return .position;
+    if (sameIdFields(x.id, y.id)) return .id;
+    if (x.scan != null and y.scan != null) return .scan;
+    return .position;
+}
+
+// Whether two native ids have the same field names in the same order: "controllerType=0
+// controllerNumber=1 scan=5" and "controllerType=0 controllerNumber=1 scan=9" do.
+fn sameIdFields(a: []const u8, b: []const u8) bool {
+    var fields_a = std.mem.tokenizeScalar(u8, a, ' ');
+    var fields_b = std.mem.tokenizeScalar(u8, b, ' ');
+    while (true) {
+        const x = fields_a.next();
+        const y = fields_b.next();
+        if (x == null or y == null) return x == null and y == null;
+        const name_x = x.?[0 .. std.mem.indexOfScalar(u8, x.?, '=') orelse return false];
+        const name_y = y.?[0 .. std.mem.indexOfScalar(u8, y.?, '=') orelse return false];
+        if (!std.mem.eql(u8, name_x, name_y)) return false;
+    }
+}
+
+// The pairing key of a spectrum, in its item's arena. Without a scan number when pairing by scan,
+// the whole id stands in, so the spectrum pairs only with one of the same id.
+fn pairingKey(item: *const Item, kind: KeyKind) ![]const u8 {
+    const arena = item.arena.allocator();
+    return switch (kind) {
+        .id => item.id,
+        .scan => if (item.scan) |scan|
+            try std.fmt.allocPrint(arena, "scan={d}", .{scan})
+        else
+            try std.fmt.allocPrint(arena, "id={s}", .{item.id}),
+        .position => try std.fmt.allocPrint(arena, "{d}", .{item.position}),
+    };
+}
+
+// Spectra of one side waiting for a partner with the same key, oldest first. Files in step keep
+// one waiting; `WINDOW` bounds the rest.
+const Pending = struct {
+    const Waiting = struct { item: Item, seq: u64 };
+    const Entry = struct { key: []u8, seq: u64 };
+
+    waiting: std.StringHashMapUnmanaged(Waiting) = .empty,
+    // Arrival order; entries whose spectrum was paired since are dropped as they reach the head.
+    queue: std.ArrayList(Entry) = .empty,
+    head: usize = 0,
+
+    fn contains(self: *const Pending, key: []const u8) bool {
+        return self.waiting.contains(key);
+    }
+
+    fn count(self: *const Pending) usize {
+        return self.waiting.count();
+    }
+
+    fn put(self: *Pending, allocator: std.mem.Allocator, key: []const u8, item: Item, seq: u64) !void {
+        const owned = try allocator.dupe(u8, key);
+        errdefer allocator.free(owned);
+        try self.queue.append(allocator, .{ .key = owned, .seq = seq });
+        errdefer self.queue.items.len -= 1;
+        try self.waiting.put(allocator, owned, .{ .item = item, .seq = seq });
+    }
+
+    fn take(self: *Pending, allocator: std.mem.Allocator, key: []const u8) ?Item {
+        const found = self.waiting.fetchRemove(key) orelse return null;
+        self.trim(allocator);
+        return found.value.item;
+    }
+
+    fn oldest(self: *Pending, allocator: std.mem.Allocator) ?Item {
+        self.trim(allocator);
+        if (self.head == self.queue.items.len) return null;
+        const entry = self.queue.items[self.head];
+        const found = self.waiting.fetchRemove(entry.key).?;
+        self.head += 1;
+        allocator.free(entry.key);
+        self.trim(allocator);
+        return found.value.item;
+    }
+
+    fn trim(self: *Pending, allocator: std.mem.Allocator) void {
+        while (self.head < self.queue.items.len) {
+            const entry = self.queue.items[self.head];
+            if (self.waiting.get(entry.key)) |live| if (live.seq == entry.seq) break;
+            allocator.free(entry.key);
+            self.head += 1;
+        }
+        if (self.head == self.queue.items.len) {
+            self.queue.clearRetainingCapacity();
+            self.head = 0;
+        }
+    }
+
+    fn deinit(self: *Pending, allocator: std.mem.Allocator) void {
+        var it = self.waiting.valueIterator();
+        while (it.next()) |live| live.item.free(allocator);
+        for (self.queue.items[self.head..]) |entry| allocator.free(entry.key);
+        self.waiting.deinit(allocator);
+        self.queue.deinit(allocator);
     }
 };
+
+// Spectra waiting for a partner beyond this many on one side are reported missing or extra.
+const WINDOW = 1024;
 
 fn run(
     allocator: std.mem.Allocator,
@@ -623,8 +724,9 @@ fn run(
     };
     defer lister.deinit();
     if (options.mode == .list) report.sink = lister.sink();
-    // A broken index trailer is reported whether or not the header is compared.
-    if (side_a.trailer != null or side_b.trailer != null)
+    // B's broken index trailer is a difference, reported whether or not the header is compared; the
+    // reference's is only worth a warning.
+    if (side_b.trailer) |problem|
         try report.add(
             null,
             .value,
@@ -633,8 +735,9 @@ fn run(
             "index trailer",
             "header",
             side_a.trailer orelse "ok",
-            side_b.trailer orelse "ok",
+            problem,
         );
+    if (side_a.trailer) |problem| std.debug.print("mzdiff: {s}: index trailer: {s}\n", .{ side_a.path, problem });
 
     if (options.header) {
         var arena_state = std.heap.ArenaAllocator.init(allocator);
@@ -668,6 +771,10 @@ fn run(
     var scratch_state = std.heap.ArenaAllocator.init(allocator);
     defer scratch_state.deinit();
     const scratch = scratch_state.allocator();
+    var pending_a: Pending = .{};
+    defer pending_a.deinit(allocator);
+    var pending_b: Pending = .{};
+    defer pending_b.deinit(allocator);
     var paired: usize = 0;
     var paired_chromatograms: usize = 0;
     var stopped_early = false;
@@ -675,50 +782,60 @@ fn run(
     const consumed: anyerror!void = consume: {
         a.advance();
         b.advance();
-        const by_scan = if (a.current != null and b.current != null) a.current.?.scan != null and b.current.?.scan != null else false;
-        a.by_scan = by_scan;
-        b.by_scan = by_scan;
-        a.previous_scan = if (a.current) |item| item.scan else null;
-        b.previous_scan = if (b.current) |item| item.scan else null;
-        while (a.isSpectrum() and b.isSpectrum()) {
+        const kind = keyKind(a.current, b.current);
+        var seq: u64 = 0;
+        var last: ?[2]usize = null;
+        while (a.isSpectrum() or b.isSpectrum()) {
             if (options.max_spectra) |limit| if (paired >= limit) {
                 stopped_early = true;
                 break;
             };
-            const ka = a.key(by_scan);
-            const kb = b.key(by_scan);
-            report.record += 1;
-            if (ka == kb) {
-                const x = a.take();
-                const y = b.take();
-                defer x.free(allocator);
-                defer y.free(allocator);
-                _ = scratch_state.reset(.retain_capacity);
-                checkOrder(&report, x, true) catch |err| break :consume err;
-                checkOrder(&report, y, false) catch |err| break :consume err;
-                if (by_scan and !std.mem.eql(u8, x.id, y.id))
-                    report.add(null, .id_mismatch, "spectrum", "id", "native id", x.id, x.id, y.id) catch |err| break :consume err;
-                compare.diffFacts(&report, x.id, x.facts, y.facts) catch |err| break :consume err;
-                compare.diffGrouping(&report, scratch, x.id, x.facts, x.elements, y.facts, y.elements) catch |err| break :consume err;
-                compare.compareArrays(&report, scratch, x.id, "spectrum", x.arrays, y.arrays) catch |err| break :consume err;
-                paired += 1;
-                a.advance();
-                b.advance();
-            } else if (ka < kb) {
-                const x = a.take();
-                defer x.free(allocator);
-                checkOrder(&report, x, true) catch |err| break :consume err;
-                report.add(.critical, .record_missing, "spectrum", "@id", "spectrum", x.id, x.id, "") catch |err| break :consume err;
-                a.advance();
-            } else {
-                const y = b.take();
-                defer y.free(allocator);
-                checkOrder(&report, y, false) catch |err| break :consume err;
-                report.add(.critical, .record_extra, "spectrum", "@id", "spectrum", y.id, "", y.id) catch |err| break :consume err;
-                b.advance();
+            inline for (.{ .{ &a, &pending_a, &pending_b, true }, .{ &b, &pending_b, &pending_a, false } }) |entry| {
+                const stream = entry[0];
+                if (stream.isSpectrum()) {
+                    const item = stream.take();
+                    stream.advance();
+                    seq += 1;
+                    const in_a = entry[3];
+                    const key = pairingKey(&item, kind) catch |err| {
+                        item.free(allocator);
+                        break :consume err;
+                    };
+                    if (entry[2].take(allocator, key)) |partner| {
+                        const x = if (in_a) item else partner;
+                        const y = if (in_a) partner else item;
+                        defer x.free(allocator);
+                        defer y.free(allocator);
+                        _ = scratch_state.reset(.retain_capacity);
+                        report.record += 1;
+                        comparePair(&report, scratch, kind, x, y, &last) catch |err| break :consume err;
+                        paired += 1;
+                    } else if (entry[1].contains(key)) {
+                        // Its key repeats on its own side: it can pair only once.
+                        defer item.free(allocator);
+                        reportUnpaired(&report, item, in_a) catch |err| break :consume err;
+                    } else {
+                        entry[1].put(allocator, key, item, seq) catch |err| {
+                            item.free(allocator);
+                            break :consume err;
+                        };
+                        while (entry[1].count() > WINDOW) {
+                            const old = entry[1].oldest(allocator).?;
+                            defer old.free(allocator);
+                            reportUnpaired(&report, old, in_a) catch |err| break :consume err;
+                        }
+                    }
+                }
             }
         }
         if (stopped_early) break :consume {};
+        // Spectra that never found a partner, each side in its file order.
+        inline for (.{ .{ &pending_a, true }, .{ &pending_b, false } }) |entry| {
+            while (entry[0].oldest(allocator)) |item| {
+                defer item.free(allocator);
+                reportUnpaired(&report, item, entry[1]) catch |err| break :consume err;
+            }
+        }
         // What is left: unpaired spectra, then chromatograms, which are few and paired by type.
         inline for (.{ .{ &a, &kept, Kind.record_missing }, .{ &b, &kept_b, Kind.record_extra } }) |entry| {
             const stream = entry[0];
@@ -733,7 +850,6 @@ fn run(
                     defer item.free(allocator);
                     report.record += 1;
                     const in_a = entry[2] == .record_missing;
-                    checkOrder(&report, item, in_a) catch |err| break :consume err;
                     report.add(
                         .critical,
                         entry[2],
@@ -806,11 +922,35 @@ fn run(
     return outcome.status;
 }
 
-// Files a spectrum that breaks the scan order pairing relies on; the pairs after it may be off.
-fn checkOrder(report: *Report, item: Item, in_a: bool) !void {
-    if (!item.out_of_order) return;
-    const text = if (item.scan == null) "no scan number" else "scan number not above the previous";
-    try report.add(.critical, .order, "spectrum", "scan", "scan order", item.id, if (in_a) text else "", if (in_a) "" else text);
+// Compares one pair of spectra. A pair whose positions run against the previous pair's (one file
+// forward, the other back) is filed as out of order; the pair itself is still compared.
+fn comparePair(report: *Report, scratch: std.mem.Allocator, kind: KeyKind, x: Item, y: Item, last: *?[2]usize) !void {
+    if (last.*) |previous| if ((x.position > previous[0]) != (y.position > previous[1])) {
+        var ta: [32]u8 = undefined;
+        var tb: [32]u8 = undefined;
+        try report.add(
+            null,
+            .order,
+            "spectrum",
+            "order",
+            "spectrum order",
+            x.id,
+            std.fmt.bufPrint(&ta, "spectrum {d}", .{x.position}) catch "",
+            std.fmt.bufPrint(&tb, "spectrum {d}", .{y.position}) catch "",
+        );
+    };
+    last.* = .{ x.position, y.position };
+    if (kind == .scan and !std.mem.eql(u8, x.id, y.id))
+        try report.add(null, .id_mismatch, "spectrum", "id", "native id", x.id, x.id, y.id);
+    try compare.diffFacts(report, x.id, x.facts, y.facts);
+    try compare.diffGrouping(report, scratch, x.id, x.facts, x.elements, y.facts, y.elements);
+    try compare.compareArrays(report, scratch, x.id, "spectrum", x.arrays, y.arrays);
+}
+
+fn reportUnpaired(report: *Report, item: Item, in_a: bool) !void {
+    report.record += 1;
+    const kind: Kind = if (in_a) .record_missing else .record_extra;
+    try report.add(.critical, kind, "spectrum", "@id", "spectrum", item.id, if (in_a) item.id else "", if (in_a) "" else item.id);
 }
 
 fn drain(allocator: std.mem.Allocator, io: std.Io, side: *Side) void {
@@ -914,6 +1054,15 @@ test "[unit] - [arguments]: each mode, format, and selection combines only where
     try std.testing.expectEqual(output.Mode.list, options.mode);
     try std.testing.expectEqual(output.Format.json, options.format);
     try std.testing.expectEqualStrings("MS:1000016", options.selection.keys[0]);
+}
+
+test "[unit] - [pairing]: native ids with the same fields pair by the whole id" {
+    try std.testing.expect(sameIdFields("controllerType=0 controllerNumber=1 scan=5", "controllerType=0 controllerNumber=1 scan=9"));
+    try std.testing.expect(sameIdFields("function=2 process=0 scan=1", "function=3 process=0 scan=1"));
+    try std.testing.expect(sameIdFields("sample=1 period=1 cycle=22 experiment=1", "sample=1 period=1 cycle=3 experiment=2"));
+    try std.testing.expect(!sameIdFields("controllerType=0 controllerNumber=1 scan=5", "scan=5"));
+    try std.testing.expect(!sameIdFields("scan=19", "sample=1 period=1 cycle=22 experiment=1"));
+    try std.testing.expect(!sameIdFields("index=3", "index"));
 }
 
 test "[unit] - [pairing]: scan numbers come from the native id" {

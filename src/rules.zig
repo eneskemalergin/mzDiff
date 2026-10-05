@@ -88,10 +88,13 @@ const EXACT = std.StaticStringMap(Severity).initComptime(.{
     // instrument serial number
     .{ "MS:1000529", .major },
     .{ "@spectrumRef", .major },
+    // spectra paired out of their files' order
+    .{ "order", .major },
+    // the native id of spectra paired by scan number
     .{ "id", .major },
     // the indexedmzML wrapper, present or not
     .{ "indexed", .major },
-    // the wrapper's tail: present, and pointing at the index // native id of spectra paired by scan number
+    // the wrapper's tail: present, and pointing at the index
     .{ "indexListOffset", .major },
     // a scan naming a configuration the header lacks
     .{ "instrumentConfiguration", .major },

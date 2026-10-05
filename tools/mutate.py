@@ -49,6 +49,12 @@ def drop_spectrum(t):
     a0, a1 = spectrum_block(t, 10)
     return t[:a0] + t[a1:]
 
+def drop_many(t):
+    # More consecutive spectra than the pairing window holds (1,024), so they leave as missing.
+    a0, _ = spectrum_block(t, 100)
+    _, b1 = spectrum_block(t, 1699)
+    return t[:a0] + t[b1:]
+
 def truncate_mid(t):
     a0, _ = spectrum_block(t, 1000)
     return t[:a0 + 300]
@@ -291,9 +297,10 @@ EXIT2 = "exit 2"
 
 # Case name, edit, and what mzdiff must report: a class key, EXIT2, or None for the same.
 CASES = [
-    ("swap_spectra", swap_spectra, "scan"),
-    ("dup_spectrum", dup_spectrum, "scan"),
+    ("swap_spectra", swap_spectra, "order"),
+    ("dup_spectrum", dup_spectrum, "@id"),
     ("drop_spectrum", drop_spectrum, "@id"),
+    ("drop_many", drop_many, "@id"),
     ("empty_spectra", empty_spectra, "@id"),
     ("truncate_mid", truncate_mid, EXIT2),
     ("truncate_after_spectra", truncate_after_spectra, EXIT2),
@@ -307,7 +314,7 @@ CASES = [
     ("ic_ref", ic_ref, "instrumentConfiguration"),
     ("array_unit", array_unit, "array:MS:1000515"),
     ("mz_unit_dropped", mz_unit_dropped, "array:MS:1000514"),
-    ("scan_id_format", scan_id_format, "id"),
+    ("scan_id_format", scan_id_format, "@id"),
     ("swap_precursor_charge", swap_precursor_charge, "MS:1000041"),
     ("swap_precursor_energy", swap_precursor_energy, "MS:1000045"),
     ("reorder_precursors", reorder_precursors, None),
