@@ -33,25 +33,49 @@ const Severity = rules_mod.Severity;
 const USAGE =
     \\usage: mzdiff [options] A.mzML B.mzML
     \\
-    \\Compares B (output under test) with A (reference) by meaning, not bytes.
+    \\Compares B (the output under test) with A (the reference) by meaning, not bytes.
     \\
-    \\options:
-    \\  --tsv                 one tab-separated row per difference class
-    \\  --examples N          examples kept per class (default 3)
-    \\  --fail-on LEVEL       exit 1 at this severity or above: critical, major (default), minor
-    \\  --max-spectra N       stop after N paired spectra (a quick look)
-    \\  --ppm X               m/z parameters within X ppm are a minor difference (default 1)
-    \\  --set KEY=LEVEL       override a key's severity (critical, major, minor, ignored);
-    \\                        KEY is an accession, user:NAME, @attribute, or array:ACCESSION
-    \\  --no-header           skip the header comparison
-    \\  -h, --help            show this text
+    \\What to show (one; the report by default):
+    \\  --summary          the verdict and its counts, on one line
+    \\  --list             every difference, one per line, in the order found
+    \\  -q, --quiet        nothing; the exit status is the answer
+    \\
+    \\How to show it (text by default):
+    \\  --json             JSON: one document, or JSON Lines with --list
+    \\  --tsv              tab-separated rows
+    \\  --color WHEN       auto (default), always, or never; text only
+    \\
+    \\Narrow what is shown (never the verdict):
+    \\  --severity LEVEL   critical, major, or minor and above (default minor)
+    \\  --key KEY          only this key; repeat for more
+    \\  --record ID        only this record, by its native id (--list); repeat for more
+    \\  --limit N          print at most N differences (--list)
+    \\  --examples N       examples per class in the report (default 3)
+    \\
+    \\Compare:
+    \\  --ppm X            m/z within X ppm is a minor difference (default 1)
+    \\  --set KEY=LEVEL    give KEY this severity: critical, major, minor, or ignored
+    \\  --no-header        skip the header
+    \\  --max-spectra N    stop after N paired spectra; the result is incomplete
+    \\  --fail-on LEVEL    exit 1 at this severity or above (default major)
+    \\
+    \\  -h, --help         this text
+    \\
+    \\A KEY is a PSI-MS accession (MS:1000016), user:NAME, @attribute, array:ACCESSION, or a
+    \\named check: id, indexed, indexListOffset, instrumentConfiguration, scan, element.
+    \\Exit status: 0 same or tolerated, 1 differs, 2 usage error or unreadable file.
     \\
 ;
+
+const Color = enum { auto, always, never };
 
 const Options = struct {
     a: []const u8,
     b: []const u8,
-    tsv: bool = false,
+    mode: output.Mode = .report,
+    format: output.Format = .text,
+    color: Color = .auto,
+    selection: output.Selection = .{},
     examples: usize = 3,
     fail_on: Severity = .major,
     max_spectra: ?usize = null,
@@ -62,75 +86,180 @@ const Options = struct {
 pub fn main(init: std.process.Init) u8 {
     const allocator = init.gpa;
     const io = init.io;
-    const args = init.minimal.args.toSlice(init.arena.allocator()) catch |err| {
+    const arena = init.arena.allocator();
+    const args = init.minimal.args.toSlice(arena) catch |err| {
         std.debug.print("mzdiff: cannot read the arguments: {s}\n", .{@errorName(err)});
         return 2;
     };
     var rules = Rules.init(allocator);
     defer rules.deinit();
-    const options = parse(args, &rules) catch |err| {
-        if (err != error.Help) std.debug.print("mzdiff: {s}\n", .{@errorName(err)});
-        std.Io.File.stderr().writeStreamingAll(io, USAGE) catch {};
-        return if (err == error.Help) 0 else 2;
+    var problem: []const u8 = "";
+    const options = parse(arena, args, &rules, &problem) catch |err| switch (err) {
+        error.Help => {
+            std.Io.File.stdout().writeStreamingAll(io, USAGE) catch {};
+            return 0;
+        },
+        else => {
+            std.debug.print(
+                "mzdiff: {s}\nmzdiff: run 'mzdiff --help' for the options\n",
+                .{if (problem.len != 0) problem else @errorName(err)},
+            );
+            return 2;
+        },
     };
+    const style: output.Style = .{ .color = options.format == .text and useColor(io, init.environ_map, options.color) };
+    const interactive = std.Io.File.stdout().isTty(io) catch false;
     var out_buffer: [64 * 1024]u8 = undefined;
     var stdout = std.Io.File.stdout().writer(io, &out_buffer);
     const out = &stdout.interface;
-    const failed = run(allocator, io, out, &rules, options) catch |err| {
+    const status = run(allocator, io, out, &rules, options, style, interactive) catch |err| {
         out.flush() catch {};
+        // A reader that closed the pipe (`| head`) has what it wanted.
+        if (err == error.WriteFailed and brokenPipe(&stdout)) return 0;
         std.debug.print("mzdiff: error.{s}\n", .{@errorName(err)});
         return 2;
     };
-    out.flush() catch return 2;
-    return if (failed) 1 else 0;
+    out.flush() catch return if (brokenPipe(&stdout)) 0 else 2;
+    return if (status == .differs) 1 else 0;
 }
 
-fn parse(args: []const []const u8, rules: *Rules) !Options {
+fn brokenPipe(writer: *const std.Io.File.Writer) bool {
+    const err = writer.err orelse return false;
+    return err == error.BrokenPipe;
+}
+
+// mzValidate's rules: a nonempty NO_COLOR wins, then a nonempty CLICOLOR_FORCE, then a terminal
+// whose TERM is not "dumb".
+fn useColor(io: std.Io, environ: *const std.process.Environ.Map, color: Color) bool {
+    switch (color) {
+        .always => return true,
+        .never => return false,
+        .auto => {},
+    }
+    if (environ.get("NO_COLOR")) |value| if (value.len != 0) return false;
+    if (environ.get("CLICOLOR_FORCE")) |value| if (value.len != 0) return true;
+    if (environ.get("TERM")) |term| if (std.mem.eql(u8, term, "dumb")) return false;
+    return std.Io.File.stdout().isTty(io) catch false;
+}
+
+const Parser = struct {
+    args: []const []const u8,
+    i: usize = 1,
+    arena: std.mem.Allocator,
+    problem: *[]const u8,
+
+    fn fail(self: *Parser, comptime fmt: []const u8, values: anytype) error{Usage} {
+        self.problem.* = std.fmt.allocPrint(self.arena, fmt, values) catch "invalid arguments";
+        return error.Usage;
+    }
+
+    fn value(self: *Parser, flag: []const u8) error{Usage}![]const u8 {
+        self.i += 1;
+        if (self.i == self.args.len) return self.fail("{s} needs a value", .{flag});
+        return self.args[self.i];
+    }
+
+    fn count(self: *Parser, flag: []const u8) error{Usage}!usize {
+        const text = try self.value(flag);
+        return std.fmt.parseInt(usize, text, 10) catch self.fail("{s} takes a whole number, not '{s}'", .{ flag, text });
+    }
+
+    // `--set` may ignore a key; `--severity` and `--fail-on` take only the three levels.
+    fn level(self: *Parser, flag: []const u8, text: []const u8, ignored: bool) error{Usage}!Severity {
+        const levels = if (ignored) "critical, major, minor, or ignored" else "critical, major, or minor";
+        const found = std.meta.stringToEnum(Severity, text) orelse
+            return self.fail("{s} takes {s}, not '{s}'", .{ flag, levels, text });
+        if (found == .ignored and !ignored) return self.fail("{s} takes {s}, not '{s}'", .{ flag, levels, text });
+        return found;
+    }
+};
+
+fn parse(arena: std.mem.Allocator, args: []const []const u8, rules: *Rules, problem: *[]const u8) !Options {
+    var p: Parser = .{ .args = args, .arena = arena, .problem = problem };
     var files: [2][]const u8 = undefined;
-    var count: usize = 0;
+    var file_count: usize = 0;
     var options: Options = .{ .a = "", .b = "" };
-    var i: usize = 1;
-    while (i < args.len) : (i += 1) {
-        const arg = args[i];
+    var keys: std.ArrayList([]const u8) = .empty;
+    var records: std.ArrayList([]const u8) = .empty;
+    var mode_flag: ?[]const u8 = null;
+    var format_flag: ?[]const u8 = null;
+    var selection_flag: ?[]const u8 = null;
+    var list_flag: ?[]const u8 = null;
+    var examples_set = false;
+    while (p.i < args.len) : (p.i += 1) {
+        const arg = args[p.i];
         if (std.mem.eql(u8, arg, "-h") or std.mem.eql(u8, arg, "--help")) return error.Help;
-        if (std.mem.eql(u8, arg, "--tsv")) {
-            options.tsv = true;
+        if (modeOf(arg)) |mode| {
+            if (mode_flag) |earlier| return p.fail("{s} and {s} are both modes; pick one", .{ earlier, arg });
+            mode_flag = arg;
+            options.mode = mode;
+        } else if (std.mem.eql(u8, arg, "--json") or std.mem.eql(u8, arg, "--tsv")) {
+            if (format_flag) |earlier| return p.fail("{s} and {s} are both formats; pick one", .{ earlier, arg });
+            format_flag = arg;
+            options.format = if (arg[2] == 'j') .json else .tsv;
+        } else if (std.mem.eql(u8, arg, "--color")) {
+            const text = try p.value(arg);
+            options.color = std.meta.stringToEnum(Color, text) orelse return p.fail(
+                "--color takes auto, always, or never, not '{s}'",
+                .{text},
+            );
+        } else if (std.mem.eql(u8, arg, "--severity")) {
+            options.selection.severity = try p.level(arg, try p.value(arg), false);
+            selection_flag = arg;
+        } else if (std.mem.eql(u8, arg, "--key")) {
+            try keys.append(arena, try p.value(arg));
+            selection_flag = arg;
+        } else if (std.mem.eql(u8, arg, "--record")) {
+            try records.append(arena, try p.value(arg));
+            list_flag = arg;
+        } else if (std.mem.eql(u8, arg, "--limit")) {
+            options.selection.limit = try p.count(arg);
+            list_flag = arg;
+        } else if (std.mem.eql(u8, arg, "--examples")) {
+            options.examples = try p.count(arg);
+            examples_set = true;
         } else if (std.mem.eql(u8, arg, "--no-header")) {
             options.header = false;
-        } else if (std.mem.eql(u8, arg, "--examples")) {
-            i += 1;
-            if (i == args.len) return error.MissingValue;
-            options.examples = try std.fmt.parseInt(usize, args[i], 10);
         } else if (std.mem.eql(u8, arg, "--max-spectra")) {
-            i += 1;
-            if (i == args.len) return error.MissingValue;
-            options.max_spectra = try std.fmt.parseInt(usize, args[i], 10);
+            options.max_spectra = try p.count(arg);
         } else if (std.mem.eql(u8, arg, "--ppm")) {
-            i += 1;
-            if (i == args.len) return error.MissingValue;
-            options.ppm = try std.fmt.parseFloat(f64, args[i]);
+            const text = try p.value(arg);
+            options.ppm = std.fmt.parseFloat(f64, text) catch return p.fail("--ppm takes a number, not '{s}'", .{text});
+            if (!(options.ppm >= 0)) return p.fail("--ppm cannot be negative", .{});
         } else if (std.mem.eql(u8, arg, "--fail-on")) {
-            i += 1;
-            if (i == args.len) return error.MissingValue;
-            options.fail_on = std.meta.stringToEnum(Severity, args[i]) orelse return error.InvalidLevel;
+            options.fail_on = try p.level(arg, try p.value(arg), false);
         } else if (std.mem.eql(u8, arg, "--set")) {
-            i += 1;
-            if (i == args.len) return error.MissingValue;
-            const eq = std.mem.lastIndexOfScalar(u8, args[i], '=') orelse return error.InvalidSet;
-            const level = std.meta.stringToEnum(Severity, args[i][eq + 1 ..]) orelse return error.InvalidLevel;
-            try rules.override(args[i][0..eq], level);
-        } else if (std.mem.startsWith(u8, arg, "-")) {
-            return error.UnknownOption;
+            const text = try p.value(arg);
+            const eq = std.mem.lastIndexOfScalar(u8, text, '=') orelse return p.fail("--set takes KEY=LEVEL, not '{s}'", .{text});
+            try rules.override(text[0..eq], try p.level(arg, text[eq + 1 ..], true));
+        } else if (std.mem.startsWith(u8, arg, "-") and arg.len > 1) {
+            return p.fail("unknown option '{s}'", .{arg});
         } else {
-            if (count == 2) return error.TooManyFiles;
-            files[count] = arg;
-            count += 1;
+            if (file_count == 2) return p.fail("one file too many: '{s}' (A and B are already given)", .{arg});
+            files[file_count] = arg;
+            file_count += 1;
         }
     }
-    if (count != 2) return error.MissingFile;
+    if (file_count != 2) return p.fail("give two files, A (the reference) and B (the output under test)", .{});
+    switch (options.mode) {
+        .quiet => if (format_flag) |flag| return p.fail("--quiet prints nothing, so {s} does not apply", .{flag}),
+        .summary => if (selection_flag) |flag| return p.fail("--summary counts everything, so {s} does not apply", .{flag}),
+        .report, .list => {},
+    }
+    if (options.mode != .list) if (list_flag) |flag| return p.fail("{s} works with --list", .{flag});
+    if (options.mode != .report and examples_set) return p.fail("--examples applies to the report only", .{});
     options.a = files[0];
     options.b = files[1];
+    options.selection.keys = keys.items;
+    options.selection.records = records.items;
     return options;
+}
+
+fn modeOf(arg: []const u8) ?output.Mode {
+    if (std.mem.eql(u8, arg, "--summary")) return .summary;
+    if (std.mem.eql(u8, arg, "--list")) return .list;
+    if (std.mem.eql(u8, arg, "-q") or std.mem.eql(u8, arg, "--quiet")) return .quiet;
+    return null;
 }
 
 // One input: its file, reader, and header. The header is read on the main thread; records are
@@ -464,7 +593,15 @@ const Stream = struct {
     }
 };
 
-fn run(allocator: std.mem.Allocator, io: std.Io, out: *std.Io.Writer, rules: *Rules, options: Options) !bool {
+fn run(
+    allocator: std.mem.Allocator,
+    io: std.Io,
+    out: *std.Io.Writer,
+    rules: *Rules,
+    options: Options,
+    style: output.Style,
+    interactive: bool,
+) !output.Status {
     const sides = try allocator.create([2]Side);
     defer allocator.destroy(sides);
     const side_a = &sides[0];
@@ -477,6 +614,15 @@ fn run(allocator: std.mem.Allocator, io: std.Io, out: *std.Io.Writer, rules: *Ru
     var report = Report.init(allocator, rules, options.examples);
     defer report.deinit();
     report.ppm = options.ppm;
+    var lister: output.Lister = .{
+        .out = out,
+        .format = options.format,
+        .style = style,
+        .selection = options.selection,
+        .allocator = allocator,
+    };
+    defer lister.deinit();
+    if (options.mode == .list) report.sink = lister.sink();
     // A broken index trailer is reported whether or not the header is compared.
     if (side_a.trailer != null or side_b.trailer != null)
         try report.add(
@@ -523,6 +669,7 @@ fn run(allocator: std.mem.Allocator, io: std.Io, out: *std.Io.Writer, rules: *Ru
     defer scratch_state.deinit();
     const scratch = scratch_state.allocator();
     var paired: usize = 0;
+    var paired_chromatograms: usize = 0;
     var stopped_early = false;
 
     const consumed: anyerror!void = consume: {
@@ -601,7 +748,7 @@ fn run(allocator: std.mem.Allocator, io: std.Io, out: *std.Io.Writer, rules: *Ru
                 stream.advance();
             }
         }
-        compareChromatograms(&report, scratch, kept.items, kept_b.items) catch |err| break :consume err;
+        paired_chromatograms = compareChromatograms(&report, scratch, kept.items, kept_b.items) catch |err| break :consume err;
     };
 
     // Stop the readers (a no-op when they finished), free what they queued, and wait for them.
@@ -622,82 +769,41 @@ fn run(allocator: std.mem.Allocator, io: std.Io, out: *std.Io.Writer, rules: *Ru
     if (side_b.failure) |err| return err;
 
     const elapsed = std.Io.Timestamp.now(io, .awake).toNanoseconds() - started.toNanoseconds();
-    const seconds = @as(f64, @floatFromInt(elapsed)) / std.time.ns_per_s;
-    const a_path = side_a.path;
-    const b_path = side_b.path;
-    const a_software = side_a.software;
-    const b_software = side_b.software;
-    const a_spectra = side_a.spectra;
-    const b_spectra = side_b.spectra;
-    const a_chromatograms = side_a.chromatograms;
-    const b_chromatograms = side_b.chromatograms;
-
     // Nothing to pair is never a pass worth trusting.
-    if (a_spectra == 0 and a_chromatograms == 0) std.debug.print("mzdiff: {s} holds no spectra or chromatograms\n", .{a_path});
+    if (side_a.spectra == 0 and side_a.chromatograms == 0) std.debug.print(
+        "mzdiff: {s} holds no spectra or chromatograms\n",
+        .{side_a.path},
+    );
 
     const classes = try report.sorted(allocator);
     defer allocator.free(classes);
-    var counts = [_]usize{0} ** 4;
-    var failed = false;
-    for (classes) |class| {
-        counts[@intFromEnum(class.severity)] += 1;
-        if (@intFromEnum(class.severity) <= @intFromEnum(options.fail_on)) failed = true;
+    var totals = [_]usize{0} ** 3;
+    for (classes) |class| if (class.severity != .ignored) {
+        totals[@intFromEnum(class.severity)] += 1;
+    };
+    const outcome: output.Outcome = .{
+        .a = .{ .path = side_a.path, .software = side_a.software, .spectra = side_a.spectra, .chromatograms = side_a.chromatograms },
+        .b = .{ .path = side_b.path, .software = side_b.software, .spectra = side_b.spectra, .chromatograms = side_b.chromatograms },
+        .paired_spectra = paired,
+        .paired_chromatograms = paired_chromatograms,
+        .completion = if (stopped_early) .incomplete else .complete,
+        .status = output.statusOf(classes, options.fail_on),
+        .fail_on = options.fail_on,
+        .totals = totals,
+        .seconds = if (interactive) @as(f64, @floatFromInt(elapsed)) / std.time.ns_per_s else null,
+    };
+    switch (options.mode) {
+        .report => try output.writeReport(out, options.format, style, outcome, classes, options.selection),
+        .summary => try output.writeSummary(out, options.format, style, outcome),
+        .list => try lister.finish(outcome),
+        .quiet => {},
     }
-
-    if (options.tsv) {
-        try out.writeAll("severity\tkind\trecords\tpath\tkey\tname\texample\ta\tb\n");
-        for (classes) |class| {
-            const example: compare.Example = if (class.examples.items.len != 0)
-                class.examples.items[0]
-            else
-                .{ .id = "", .a = "", .b = "" };
-            try out.print("{s}\t{s}\t{d}", .{ @tagName(class.severity), @tagName(class.kind), class.records });
-            for ([_][]const u8{ class.path, class.key, class.name, example.id, example.a, example.b }) |field| {
-                try out.writeByte('\t');
-                try writeField(out, field);
-            }
-            try out.writeByte('\n');
-        }
-        // The TSV has no summary lines, so a partial comparison is said on stderr.
-        if (stopped_early) std.debug.print(
-            "mzdiff: stopped after {d} paired spectra (--max-spectra); chromatograms not compared\n",
-            .{paired},
-        );
-        return failed;
-    }
-
-    try out.print("A  {s}  ({s})\nB  {s}  ({s})\n", .{ a_path, a_software, b_path, b_software });
-    try out.print("spectra        A {d}  B {d}  paired {d}{s}\n", .{
-        a_spectra,
-        b_spectra,
-        paired,
-        if (stopped_early) "  (stopped early)" else "",
-    });
-    try out.print("chromatograms  A {d}  B {d}\n", .{ a_chromatograms, b_chromatograms });
-    try out.print("time           {d:.2} s\n", .{seconds});
-    if (classes.len == 0) {
-        try out.writeAll("result         same in everything compared\n");
-        return failed;
-    }
-    try out.print("result         {d} critical, {d} major, {d} minor difference classes\n", .{ counts[0], counts[1], counts[2] });
-    var current: ?Severity = null;
-    for (classes) |class| {
-        if (current != class.severity) {
-            current = class.severity;
-            try out.print("\n{s}\n", .{class.severity.label()});
-        }
-        try out.print("  {d:>8}  {s:<26} ", .{ class.records, class.kind.label() });
-        try writeShortPath(out, class.path);
-        try out.print("  {s}", .{class.key});
-        if (class.name.len != 0) try out.print(" ({s})", .{class.name});
-        try out.writeByte('\n');
-        for (class.examples.items) |example| {
-            try out.print("            {s}", .{example.id});
-            if (example.a.len != 0 or example.b.len != 0) try out.print("  A: {s}  B: {s}", .{ orNone(example.a), orNone(example.b) });
-            try out.writeByte('\n');
-        }
-    }
-    return failed;
+    // Only the text forms say so themselves.
+    if (stopped_early and options.format != .text and options.mode != .quiet) std.debug.print(
+        "mzdiff: stopped after {d} paired spectra (--max-spectra); the result is incomplete\n",
+        .{paired},
+    );
+    return outcome.status;
 }
 
 // Files a spectrum that breaks the scan order pairing relies on; the pairs after it may be off.
@@ -711,33 +817,6 @@ fn drain(allocator: std.mem.Allocator, io: std.Io, side: *Side) void {
     while (side.queue.getOne(io)) |item| item.free(allocator) else |_| {}
 }
 
-// A TSV field with tabs and line breaks escaped, so each class stays one row.
-fn writeField(out: *std.Io.Writer, text: []const u8) !void {
-    for (text) |c| switch (c) {
-        '\t' => try out.writeAll("\\t"),
-        '\n' => try out.writeAll("\\n"),
-        '\r' => try out.writeAll("\\r"),
-        '\\' => try out.writeAll("\\\\"),
-        else => try out.writeByte(c),
-    };
-}
-
-fn orNone(text: []const u8) []const u8 {
-    return if (text.len == 0) "-" else text;
-}
-
-// Drops the list levels, which add length but no meaning: spectrum/scanList/scan -> spectrum/scan.
-fn writeShortPath(out: *std.Io.Writer, path: []const u8) !void {
-    var parts = std.mem.splitScalar(u8, path, '/');
-    var first = true;
-    while (parts.next()) |part| {
-        if (std.mem.endsWith(u8, part, "List") and parts.peek() != null) continue;
-        if (!first) try out.writeByte('/');
-        try out.writeAll(part);
-        first = false;
-    }
-}
-
 fn collectRun(arena: std.mem.Allocator, rules: *Rules, facts: *std.ArrayList(Fact), header: *const model.Header) !void {
     var run_node = header.run;
     run_node.children = &.{};
@@ -745,8 +824,10 @@ fn collectRun(arena: std.mem.Allocator, rules: *Rules, facts: *std.ArrayList(Fac
 }
 
 // Pairs chromatograms by type and id, then by type alone (TIC with TIC whatever its id), then by
-// id alone, so a list of same-typed SRM traces pairs by id rather than by position.
-fn compareChromatograms(report: *Report, scratch: std.mem.Allocator, a: []Item, b: []Item) !void {
+// id alone, so a list of same-typed SRM traces pairs by id rather than by position. Returns how
+// many pairs it compared.
+fn compareChromatograms(report: *Report, scratch: std.mem.Allocator, a: []Item, b: []Item) !usize {
+    var paired: usize = 0;
     const partner = try scratch.alloc(?*Item, a.len);
     @memset(partner, null);
     inline for (.{ Match.type_and_id, Match.type_only, Match.id_only }) |how| {
@@ -765,12 +846,14 @@ fn compareChromatograms(report: *Report, scratch: std.mem.Allocator, a: []Item, 
         try compare.diffFacts(report, x.id, x.facts, y.facts);
         try compare.diffGrouping(report, scratch, x.id, x.facts, x.elements, y.facts, y.elements);
         try compare.compareArrays(report, scratch, x.id, "chromatogram", x.arrays, y.arrays);
+        paired += 1;
     }
     for (b) |y| {
         if (y.used) continue;
         report.record += 1;
         try report.add(.major, .record_extra, "chromatogram", "@id", "chromatogram", y.id, "", y.id);
     }
+    return paired;
 }
 
 const Match = enum { type_and_id, type_only, id_only };
@@ -796,6 +879,41 @@ test {
     _ = compare;
     _ = output;
     _ = rules_mod;
+}
+
+test "[unit] - [arguments]: each mode, format, and selection combines only where it applies" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    var rules = Rules.init(std.testing.allocator);
+    defer rules.deinit();
+    const cases = [_]struct { args: []const []const u8, problem: []const u8 }{
+        .{ .args = &.{ "--list", "--summary" }, .problem = "--list and --summary are both modes; pick one" },
+        .{ .args = &.{ "--json", "--tsv" }, .problem = "--json and --tsv are both formats; pick one" },
+        .{ .args = &.{ "-q", "--json" }, .problem = "--quiet prints nothing, so --json does not apply" },
+        .{ .args = &.{ "--summary", "--severity", "major" }, .problem = "--summary counts everything, so --severity does not apply" },
+        .{ .args = &.{ "--limit", "5" }, .problem = "--limit works with --list" },
+        .{ .args = &.{ "--list", "--examples", "2" }, .problem = "--examples applies to the report only" },
+        .{ .args = &.{ "--severity", "ignored" }, .problem = "--severity takes critical, major, or minor, not 'ignored'" },
+        .{ .args = &.{ "--set", "MS:1000511" }, .problem = "--set takes KEY=LEVEL, not 'MS:1000511'" },
+    };
+    for (cases) |case| {
+        var args: std.ArrayList([]const u8) = .empty;
+        try args.appendSlice(arena.allocator(), &.{ "mzdiff", "a.mzML", "b.mzML" });
+        try args.appendSlice(arena.allocator(), case.args);
+        var problem: []const u8 = "";
+        try std.testing.expectError(error.Usage, parse(arena.allocator(), args.items, &rules, &problem));
+        try std.testing.expectEqualStrings(case.problem, problem);
+    }
+    var problem: []const u8 = "";
+    const options = try parse(
+        arena.allocator(),
+        &.{ "mzdiff", "--list", "--json", "--key", "MS:1000016", "a.mzML", "b.mzML" },
+        &rules,
+        &problem,
+    );
+    try std.testing.expectEqual(output.Mode.list, options.mode);
+    try std.testing.expectEqual(output.Format.json, options.format);
+    try std.testing.expectEqualStrings("MS:1000016", options.selection.keys[0]);
 }
 
 test "[unit] - [pairing]: scan numbers come from the native id" {
