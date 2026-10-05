@@ -114,7 +114,7 @@ pub const Report = struct {
     }
 
     /// Like `add`, and marks the path as holding a real difference in this record.
-    pub fn addDirty(self: *Report, severity: ?Severity, kind: Kind, path: []const u8, key: []const u8, name: []const u8, id: []const u8, a: []const u8, b: []const u8) !void {
+    fn addDirty(self: *Report, severity: ?Severity, kind: Kind, path: []const u8, key: []const u8, name: []const u8, id: []const u8, a: []const u8, b: []const u8) !void {
         try self.dirty.append(self.allocator, path);
         try self.add(severity, kind, path, key, name, id, a, b);
     }
@@ -394,7 +394,7 @@ fn orDash(text: []const u8) []const u8 {
 
 const Verdict = enum { same, narrow, rounding, ppm, different };
 
-/// How two values of the same key compare: equal, equal within a tolerance (and which), or not.
+// How two values of the same key compare: equal, equal within a tolerance (and which), or not.
 fn compareValues(ppm: f64, x: Fact, y: Fact) Verdict {
     if (x.number != null and y.number != null) {
         const p = x.number.?;
@@ -605,7 +605,7 @@ pub fn dedupe(facts: []Fact) []Fact {
 /// rounded to its places, within half a unit of each. A scale (1/60 for seconds read as minutes)
 /// carries each spelling's precision into the compared unit. A value printed as an integer is
 /// never a rounding: "26" against "26.112" is a nominal value, not the measured one.
-pub fn lastDigit(text_a: []const u8, text_b: []const u8, a: f64, b: f64, scale_a: f64, scale_b: f64) bool {
+fn lastDigit(text_a: []const u8, text_b: []const u8, a: f64, b: f64, scale_a: f64, scale_b: f64) bool {
     const da = decimals(text_a) orelse return relativeClose(a, b);
     const db = decimals(text_b) orelse return relativeClose(a, b);
     if (da == 0 or db == 0) return false;
@@ -627,7 +627,7 @@ fn isMz(key: []const u8) bool {
 /// True when the values agree to 32-bit precision: they round to the same 32-bit float, or lie
 /// within one 32-bit epsilon (2^-23, relative) when rounding falls on either side of a boundary.
 /// One side stored or printed a 32-bit value, the other the 64-bit value it came from.
-pub fn sameAt32(a: f64, b: f64) bool {
+fn sameAt32(a: f64, b: f64) bool {
     const x: f32 = @floatCast(a);
     const y: f32 = @floatCast(b);
     if (x == y) return true;
@@ -820,15 +820,15 @@ fn valueAt(values: mzml.DecodedArrays.Values, at: usize) f64 {
 }
 
 const Mismatch = struct {
-    /// First index whose values differ at all (beyond what 32-bit storage explains when either
-    /// side is 32-bit).
+    // First index whose values differ at all (beyond what 32-bit storage explains when either
+    // side is 32-bit).
     exact: ?usize = null,
-    /// First index whose values differ beyond the tolerance.
+    // First index whose values differ beyond the tolerance.
     beyond: ?usize = null,
 };
 
-/// Finds differing values. `ppm` > 0 compares within that many parts per million (m/z arrays);
-/// otherwise within 32-bit precision.
+// Finds differing values. `ppm` > 0 compares within that many parts per million (m/z arrays);
+// otherwise within 32-bit precision.
 fn firstMismatch(a: mzml.DecodedArrays.Values, b: mzml.DecodedArrays.Values, ppm: f64) Mismatch {
     if (a == .float64 and b == .float64 and std.mem.eql(u8, std.mem.sliceAsBytes(a.float64), std.mem.sliceAsBytes(b.float64))) return .{};
     if (a == .float32 and b == .float32 and std.mem.eql(u8, std.mem.sliceAsBytes(a.float32), std.mem.sliceAsBytes(b.float32))) return .{};

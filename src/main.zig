@@ -153,10 +153,10 @@ const Side = struct {
     failure: ?anyerror = null,
     spectra: usize = 0,
     chromatograms: usize = 0,
-    /// Each instrument configuration's component facts by id, for the scans that refer to it.
+    // Each instrument configuration's component facts by id, for the scans that refer to it.
     configurations: std.StringHashMapUnmanaged([]const Fact) = .empty,
     default_configuration: ?[]const u8 = null,
-    /// What is wrong with the indexed wrapper's tail, or null.
+    // What is wrong with the indexed wrapper's tail, or null.
     trailer: ?[]const u8 = null,
     configuration_arena: std.heap.ArenaAllocator = undefined,
 
@@ -248,7 +248,7 @@ const Item = struct {
     kind: model.Kind,
     id: []const u8,
     scan: ?u64,
-    /// The chromatogram type term (TIC, base peak, SRM, ...), or "" without one.
+    // The chromatogram type term (TIC, base peak, SRM, ...), or "" without one.
     type: []const u8,
     facts: []Fact,
     elements: []const compare.Element,
@@ -256,7 +256,7 @@ const Item = struct {
     arena: *std.heap.ArenaAllocator,
     owner: *Side,
     used: bool = false,
-    /// Pairing by scan number, this spectrum has none, or one not above the previous spectrum's.
+    // Pairing by scan number, this spectrum has none, or one not above the previous spectrum's.
     out_of_order: bool = false,
 
     fn free(self: *const Item, allocator: std.mem.Allocator) void {
@@ -436,7 +436,7 @@ const Stream = struct {
         };
     }
 
-    /// Hands over the current item; the caller frees it.
+    // Hands over the current item; the caller frees it.
     fn take(self: *Stream) Item {
         const item = self.current.?;
         self.current = null;
