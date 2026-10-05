@@ -20,11 +20,14 @@ const zmz = @import("zmz");
 const mzml = zmz.mzml;
 const model = mzml.model;
 
-const Rules = @import("rules.zig").Rules;
-const Severity = @import("rules.zig").Severity;
 const compare = @import("compare.zig");
-const Report = compare.Report;
+const rules_mod = @import("rules.zig");
+
 const Fact = compare.Fact;
+const Kind = compare.Kind;
+const Report = compare.Report;
+const Rules = rules_mod.Rules;
+const Severity = rules_mod.Severity;
 
 const USAGE =
     \\usage: mzdiff [options] A.mzML B.mzML
@@ -670,8 +673,6 @@ fn drain(allocator: std.mem.Allocator, io: std.Io, side: *Side) void {
     while (side.queue.getOne(io)) |item| item.free(allocator) else |_| {}
 }
 
-const Kind = compare.Kind;
-
 // A TSV field with tabs and line breaks escaped, so each class stays one row.
 fn writeField(out: *std.Io.Writer, text: []const u8) !void {
     for (text) |c| switch (c) {
@@ -753,7 +754,7 @@ fn match(list: []Item, x: *const Item, how: Match) ?*Item {
 
 test {
     _ = compare;
-    _ = @import("rules.zig");
+    _ = rules_mod;
 }
 
 test "scan numbers come from the native id" {
