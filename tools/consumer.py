@@ -114,11 +114,14 @@ def with_arrays(change, bits=None, compressed=None, which=None):
             return block
         mz, inten = change(decode(found["mz"].group(0)), decode(found["i"].group(0)))
         new = {"mz": mz, "i": inten}
+        length = len(decode(found["mz"].group(0)))
         for key in sorted(found, key=lambda k: -found[k].start()):
             if which and key not in which:
                 continue
             m = found[key]
             block = block[:m.start()] + encode(m.group(0), new[key], bits, compressed) + block[m.end():]
+        if len(mz) != length:
+            block = re.sub(r'defaultArrayLength="\d+"', f'defaultArrayLength="{len(mz)}"', block, count=1)
         return block
     return edit
 
@@ -181,10 +184,13 @@ def group_ref(block):
     return block[:first] + '          <referenceableParamGroupRef ref="mzdiffMs2" />\n' + block[first:]
 
 def strip_index(text):
+    """The mzML without its indexedmzML wrapper, keeping the namespace the wrapper declared."""
     start = text.index("<mzML")
-    start = text.rindex("\n", 0, start) + 1
     end = text.index("</mzML>") + len("</mzML>")
-    return '<?xml version="1.0" encoding="utf-8"?>\n' + text[start:end] + "\n"
+    body = text[start:end]
+    if ' xmlns="' not in body[:body.index(">")]:
+        body = '<mzML xmlns="http://psi.hupo.org/ms/mzml"' + body[len("<mzML"):]
+    return '<?xml version="1.0" encoding="utf-8"?>\n' + body + "\n"
 
 # Each case: name, the edit of every chosen spectrum, and an optional edit of the whole file.
 CASES = [
