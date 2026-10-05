@@ -15,17 +15,17 @@
 
 mzdiff compares a reference mzML (A) with an output under test (B) and reports every difference that changes what a reader would get, classed as critical, major, or minor. I built it to check mzBridge against the gold references: the ThermoRawFileParser (TRFP) mzML beside each `.raw` in the corpus. It checks the peers (OpenTFRaw, mzdata) the same way.
 
-A difference mzdiff fails to report is its worst defect, so every check comes with a case in the `mutate.py` defect harness that shows it can fail. What a file must be on its own (index offsets, checksum, schema, vocabulary) is left to mzValidate; `corpus.sh` runs both.
+A difference mzdiff fails to report is its worst defect, so every check comes with a case in the `tools/mutate.py` defect harness that shows it can fail. What a file must be on its own (index offsets, checksum, schema, vocabulary) is left to mzValidate; `tools/corpus.sh` runs both.
 
 ## Quick start
 
 ```bash
-zig build -Doptimize=ReleaseFast                          # needs zmz checked out next to this repository (../zmz)
-zig build test --summary all                              # self-contained tests; no data files needed
-./zig-out/bin/mzdiff REFERENCE.mzML OTHER.mzML            # report, most severe classes first
-./zig-out/bin/mzdiff --tsv REFERENCE.mzML OTHER.mzML      # one row per difference class
-./corpus.sh [-t mzbridge|opentfraw|mzdata] [RAW...]       # convert and compare the corpus, one file at a time
-./mutate.py zig-out/bin/mzdiff REFERENCE.mzML             # inject defects and check each one is caught
+zig build -Doptimize=ReleaseFast                         # needs zmz checked out next to this repository (../zmz)
+zig build test --summary all                             # self-contained tests; no data files needed
+./zig-out/bin/mzdiff REFERENCE.mzML OTHER.mzML           # report, most severe classes first
+./zig-out/bin/mzdiff --tsv REFERENCE.mzML OTHER.mzML     # one row per difference class
+tools/corpus.sh [-t mzbridge|opentfraw|mzdata] [RAW...]  # convert and compare the corpus, one file at a time
+tools/mutate.py zig-out/bin/mzdiff REFERENCE.mzML        # inject defects and check each one is caught
 ```
 
 Requires **Zig 0.16.0** and the zmz package (`../zmz`), which reads the mzML. `corpus.sh` also uses the mzBridge checkout beside this one (`../mzBridge`, or `MZBRIDGE=PATH`): its `zig-out/bin/mzBridge`, and the peers and mzValidate in its `tools/bin/`.

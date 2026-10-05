@@ -2,13 +2,13 @@
 # Converts corpus .raw files with one tool and compares each output with the TRFP reference
 # mzML beside the .raw, using mzdiff; also runs mzValidate on each output.
 #
-# usage: ./corpus.sh [-t TOOL] [-o OUT] [-c DIR] [RAW...]
+# usage: tools/corpus.sh [-t TOOL] [-o OUT] [-c DIR] [RAW...]
 #   -t TOOL  mzbridge (default), opentfraw, or mzdata
 #   -o OUT   directory for the per-file mzdiff TSVs and summary.tsv (default: a new /var/tmp dir)
 #   -c DIR   corpus root searched when no RAW is given (default: $MZDIFF_CORPUS)
 #   RAW...   files to check; default every .raw with a .mzML reference beside it
 #
-# MZBRIDGE names the mzBridge checkout (default: ../mzBridge beside this repo); its zig-out holds
+# MZBRIDGE names the mzBridge checkout (default: ../mzBridge beside this repository); its zig-out holds
 # mzBridge and its tools/bin the peers and mzValidate.
 #
 # One file at a time, so a run does not compete with itself for memory or disk. Converted output
@@ -20,8 +20,8 @@
 # file; the first line of mzdiff's message follows).
 set -euo pipefail
 
-here=$(cd "$(dirname "$0")" && pwd)
-repo=${MZBRIDGE:-$here/../mzBridge}
+root=$(cd "$(dirname "$0")/.." && pwd)
+repo=${MZBRIDGE:-$root/../mzBridge}
 [ -d "$repo" ] || { echo "mzBridge checkout not found: $repo (set MZBRIDGE)" >&2; exit 2; }
 repo=$(cd "$repo" && pwd)
 tool=mzbridge
@@ -38,8 +38,8 @@ done
 shift $((OPTIND - 1))
 case $tool in mzbridge | opentfraw | mzdata) ;; *) echo "unknown tool: $tool" >&2; exit 2 ;; esac
 
-(cd "$here" && zig build -Doptimize=ReleaseFast)
-mzdiff="$here/zig-out/bin/mzdiff"
+(cd "$root" && zig build -Doptimize=ReleaseFast)
+mzdiff="$root/zig-out/bin/mzdiff"
 if [ "$tool" = mzbridge ]; then (cd "$repo" && zig build -Doptimize=ReleaseFast); fi
 validate="$repo/tools/bin/mzValidate"
 if [ ! -x "$validate" ]; then
@@ -91,7 +91,7 @@ revision() { # dir: its commit, marked when the work tree differs from it
 {
   echo "tool: $tool"
   echo "date: $(date -Iseconds)"
-  echo "mzdiff: $(revision "$here")"
+  echo "mzdiff: $(revision "$root")"
   echo "mzBridge: $(revision "$repo")"
   if [ -x "$validate" ]; then echo "mzValidate: $("$validate" --version 2>&1 | head -1)"; fi
 } > "$out/run.txt"

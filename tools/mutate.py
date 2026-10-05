@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Injects one defect at a time into a reference mzML and checks that mzdiff reports it.
 
-usage: ./mutate.py MZDIFF REFERENCE.mzML [CASE...]
+usage: tools/mutate.py MZDIFF REFERENCE.mzML [CASE...]
 
 Each case names the key of the critical or major class it must raise, `exit 2` when the file must
 fail to read, `minor:KIND` when it must raise that minor kind and nothing more serious (a
