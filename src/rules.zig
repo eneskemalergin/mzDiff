@@ -108,6 +108,8 @@ const EXACT = std.StaticStringMap(Severity).initComptime(.{
     .{ "form:integer", .critical },
     // a spectrum's or chromatogram's parameters taken through a group
     .{ "form:paramGroup", .major },
+    // an array in MS-Numpress
+    .{ "form:numpress", .major },
     .{ "@startTimeStamp", .major },
 
     // Bookkeeping that differs between tools by design.
