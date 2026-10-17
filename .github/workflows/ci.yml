@@ -1,8 +1,8 @@
 name: CI
 
-# A pull request gets one x86_64 job: format, tool syntax, and the Debug tests. A push to main adds
-# the ReleaseFast build that ships and, while the repository is public, an aarch64 run on GitHub's
-# free arm64 runners. Changes to documentation alone start nothing.
+# Every pull request gets one x86_64 job, the required check: format, tool syntax, and the Debug
+# tests. A push to main adds the ReleaseFast build that ships and, while the repository is public,
+# an aarch64 run on GitHub's free arm64 runners; a push of documentation alone starts nothing.
 
 on:
   push:
@@ -10,7 +10,6 @@ on:
     paths-ignore: ["**.md", "LICENSE", "CITATION.cff", "assets/**", "wiki/**"]
   pull_request:
     branches: [main]
-    paths-ignore: ["**.md", "LICENSE", "CITATION.cff", "assets/**", "wiki/**"]
   workflow_dispatch:
 
 permissions: {}
