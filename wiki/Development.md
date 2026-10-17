@@ -6,6 +6,7 @@
 zig build                                  # Debug build
 zig build test --summary all               # unit tests; no data files needed
 zig build -Doptimize=ReleaseFast           # the stripped build that ships and is measured
+zig build run -- A.mzML B.mzML             # build and run in one step
 ```
 
 The tests sit beside the code in `src/` and build their inputs in memory. Real files are used only by the tools below.

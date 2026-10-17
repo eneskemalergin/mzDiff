@@ -1,5 +1,5 @@
-//! Builds `mzdiff`, the mzML comparator, against zmz, and defines the `test` step. ReleaseFast
-//! builds are stripped, the only form that ships or is measured.
+//! Builds `mzdiff`, the mzML comparator, against zmz, and defines the `run` and `test` steps.
+//! ReleaseFast builds are stripped, the only form that ships or is measured.
 
 const std = @import("std");
 
@@ -20,7 +20,11 @@ pub fn build(b: *std.Build) void {
         .imports = &.{.{ .name = "zmz", .module = zmz }},
     });
     module.addOptions("build_options", options);
-    b.installArtifact(b.addExecutable(.{ .name = "mzdiff", .root_module = module }));
+    const exe = b.addExecutable(.{ .name = "mzdiff", .root_module = module });
+    b.installArtifact(exe);
+    const run = b.addRunArtifact(exe);
+    if (b.args) |args| run.addArgs(args);
+    b.step("run", "Build and run mzdiff: zig build run -- A.mzML B.mzML").dependOn(&run.step);
     const tests = b.addTest(.{ .root_module = module });
     b.step("test", "Run the mzdiff tests").dependOn(&b.addRunArtifact(tests).step);
 }
