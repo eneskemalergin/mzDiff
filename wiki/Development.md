@@ -10,6 +10,12 @@ zig build -Doptimize=ReleaseFast           # the stripped build that ships and i
 
 The tests sit beside the code in `src/` and build their inputs in memory. Real files are used only by the tools below.
 
+zmz comes from its release, pinned by URL and hash in `build.zig.zon`. To build against a zmz checkout instead, pass it as a fork; nothing in the repository changes:
+
+```bash
+zig build test --fork=../zmz
+```
+
 ## Source layout
 
 ```text

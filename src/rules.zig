@@ -281,7 +281,7 @@ pub const Rules = struct {
         const vocabulary = self.vocabulary orelse return null;
         for (ANCESTORS) |rule| {
             if (rule[1] == .ignored) continue;
-            if (vocabulary.isA(key, rule[0], 10_000) catch false) return rule[0];
+            if (vocabulary.isA(key, rule[0]) catch false) return rule[0];
         }
         return null;
     }
@@ -291,19 +291,19 @@ pub const Rules = struct {
         const accession = if (std.mem.startsWith(u8, key, "array:")) key["array:".len..] else key;
         const vocabulary = self.vocabulary orelse return null;
         const match = vocabulary.lookup(accession) orelse return null;
-        return match.term.name;
+        return match.term.name();
     }
 
     /// Whether `accession` is `parent` or one of its descendants in the bundled vocabulary.
     pub fn isA(self: *const Rules, accession: []const u8, parent: []const u8) bool {
         const vocabulary = self.vocabulary orelse return false;
-        return vocabulary.isA(accession, parent, 10_000) catch false;
+        return vocabulary.isA(accession, parent) catch false;
     }
 
     fn byAncestry(self: *const Rules, accession: []const u8) Severity {
         const vocabulary = self.vocabulary orelse return .minor;
         for (ANCESTORS) |rule| {
-            const is_a = vocabulary.isA(accession, rule[0], 10_000) catch false;
+            const is_a = vocabulary.isA(accession, rule[0]) catch false;
             if (is_a) return rule[1];
         }
         return .minor;

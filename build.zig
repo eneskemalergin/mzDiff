@@ -7,9 +7,11 @@ pub fn build(b: *std.Build) void {
     const target = b.standardTargetOptions(.{});
     const optimize = b.standardOptimizeOption(.{});
     const zmz = b.dependency("zmz", .{ .target = target, .optimize = optimize }).module("zmz");
-    // The version in build.zig.zon, for --version and the JSON output.
+    // The version in build.zig.zon, for --version and the JSON output. Its name differs from
+    // zmz's own `version` option: two options files with equal contents are one file to Zig, and
+    // one file cannot root two modules.
     const options = b.addOptions();
-    options.addOption([]const u8, "version", @import("build.zig.zon").version);
+    options.addOption([]const u8, "mzdiff_version", @import("build.zig.zon").version);
     const module = b.createModule(.{
         .root_source_file = b.path("src/main.zig"),
         .target = target,

@@ -60,10 +60,9 @@ The verdict is `same`, `tolerated` (nothing at or above `--fail-on`, default `ma
 
 ## Install
 
-Build from source with **Zig 0.16.0** exactly. mzdiff reads mzML through [zmz](https://github.com/eneskemalergin/zmz), which must be checked out beside this repository:
+Build from source with **Zig 0.16.0** exactly. mzdiff reads mzML through [zmz](https://github.com/eneskemalergin/zmz) 0.1.0, which `zig build` fetches from its release and checks against the hash in `build.zig.zon`:
 
 ```bash
-git clone https://github.com/eneskemalergin/zmz.git
 git clone https://github.com/eneskemalergin/mzDiff.git
 cd mzDiff
 zig build -Doptimize=ReleaseFast

@@ -738,7 +738,7 @@ fn writeSummaryLine(out: *std.Io.Writer, style: Style, outcome: Outcome) !void {
     });
 }
 
-pub const VERSION = @import("build_options").version;
+pub const VERSION = @import("build_options").mzdiff_version;
 
 /// Why a run could not complete, for stderr and for JSON. `side` and `path` are null when the
 /// failure is not one file's (out of memory, a closed output).
