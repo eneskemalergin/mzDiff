@@ -1,0 +1,19 @@
+cff-version: 1.2.0
+message: "If you use mzdiff in your work, please cite it."
+title: "mzdiff: compares two mzML files by meaning"
+type: software
+abstract: "mzdiff compares a reference mzML file with an output under test and reports every difference that changes what a reader would get, classed as critical, major, or minor. It pairs records in any order, ignores bookkeeping by rule, rates severities through the PSI-MS vocabulary, and reports data written in forms readers fail on."
+url: "https://github.com/eneskemalergin/mzDiff"
+repository-code: "https://github.com/eneskemalergin/mzDiff"
+authors:
+  - family-names: "Ergin"
+    given-names: "Enes K."
+    orcid: "https://orcid.org/0000-0001-9810-7399"
+license: "MIT"
+keywords:
+  - mass-spectrometry
+  - proteomics
+  - mzml
+  - zig
+  - diff
+  - file-comparison
