@@ -136,7 +136,14 @@ pub const Page = struct {
             defer refusal.deinit();
             try self.tally.writeRefusal(&refusal.writer);
             try out.writeAll("<main><pre class=\"refuse\">");
-            try writeEscaped(out, std.mem.trimEnd(u8, refusal.written(), "\n"));
+            var lines = std.mem.splitScalar(u8, std.mem.trimEnd(u8, refusal.written(), "\n"), '\n');
+            var first = true;
+            while (lines.next()) |line| {
+                if (!first) try out.writeAll("\n");
+                first = false;
+                const prefix = "mzdiff: ";
+                try writeEscaped(out, if (std.mem.startsWith(u8, line, prefix)) line[prefix.len..] else line);
+            }
             try out.writeAll("</pre></main>\n");
         } else if (self.tally.total() == 0) {
             try out.writeAll("<main><p class=\"same\">Nothing selected differs.</p></main>\n");
@@ -519,6 +526,12 @@ test "[edge] - [html]: a view past its cap becomes a page that says how to narro
         .seconds = null,
     });
     const html = out.buffered();
-    try std.testing.expect(std.mem.indexOf(u8, html, "<pre class=\"refuse\">mzdiff: too large to view: 2 records differ") != null);
+    const open = "<pre class=\"refuse\">";
+    const start = (std.mem.indexOf(u8, html, open) orelse return error.TestUnexpectedResult) + open.len;
+    const refusal = html[start .. std.mem.indexOfPos(u8, html, start, "</pre>") orelse return error.TestUnexpectedResult];
+    try std.testing.expect(std.mem.startsWith(u8, refusal, "too large to view: 2 records differ"));
+    try std.testing.expect(std.mem.indexOf(u8, refusal, "\n  --record ID shows one record") != null);
+    try std.testing.expect(std.mem.indexOf(u8, refusal, "\\n") == null);
+    try std.testing.expect(std.mem.indexOf(u8, refusal, "mzdiff:") == null);
     try std.testing.expectEqual(@as(usize, 0), std.mem.count(u8, html, "<details class=\"rec\""));
 }
