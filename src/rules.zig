@@ -87,6 +87,9 @@ const EXACT = std.StaticStringMap(Severity).initComptime(.{
     .{ "MS:1000569", .major },
     // instrument serial number
     .{ "MS:1000529", .major },
+    // calibration spectrum: a spectrum attribute, not a spectrum type, but a reader that loses it
+    // takes calibration scans for sample data
+    .{ "MS:1000928", .major },
     .{ "@spectrumRef", .major },
     // spectra paired out of their files' order
     .{ "order", .major },
@@ -319,6 +322,8 @@ test "[unit] - [severity]: exact keys win over ancestry and the default" {
     try std.testing.expectEqual(Severity.ignored, rules.severity("@index"));
     try std.testing.expectEqual(Severity.minor, rules.severity("user:Something"));
     try std.testing.expectEqual(Severity.major, rules.severity("array:MS:1000617"));
+    // calibration spectrum, under spectrum attribute (minor by ancestry)
+    try std.testing.expectEqual(Severity.major, rules.severity("MS:1000928"));
 }
 
 test "[unit] - [severity]: ancestry classifies activation methods, polarity, and models" {
