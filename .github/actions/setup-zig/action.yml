@@ -1,0 +1,49 @@
+name: Set up Zig
+description: Install the pinned Zig release, verified against its SHA-256 from ziglang.org/download/index.json, and cache it.
+
+runs:
+  using: composite
+  steps:
+    # A runner downloads Zig only when no cached copy exists; the checksum is checked on download,
+    # and only runs on this repository's branches write the cache.
+    - name: Restore Zig 0.16.0
+      uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+      with:
+        path: ${{ runner.temp }}/zig-toolchain
+        key: zig-0.16.0-${{ runner.os }}-${{ runner.arch }}
+    - name: Install Zig 0.16.0
+      shell: bash
+      # The PATH entry is built from RUNNER_TEMP and constants only; nothing outside can steer it.
+      run: | # zizmor: ignore[github-env]
+        set -euo pipefail
+        version=0.16.0
+        case "${RUNNER_OS}-${RUNNER_ARCH}" in
+          Linux-X64)   target=x86_64-linux;  sha=70e49664a74374b48b51e6f3fdfbf437f6395d42509050588bd49abe52ba3d00 ;;
+          Linux-ARM64) target=aarch64-linux; sha=ea4b09bfb22ec6f6c6ceac57ab63efb6b46e17ab08d21f69f3a48b38e1534f17 ;;
+          *) echo "::error::no pinned Zig for ${RUNNER_OS}-${RUNNER_ARCH}"; exit 1 ;;
+        esac
+        name="zig-${target}-${version}"
+        home="${RUNNER_TEMP}/zig-toolchain"
+        if [ ! -x "${home}/${name}/zig" ]; then
+          mkdir -p "${home}"
+          tarball="${RUNNER_TEMP}/${name}.tar.xz"
+          # Community mirrors first, in random order, as ziglang.org asks of CI; ziglang.org itself
+          # is the last resort. The pinned checksum decides, so any source is safe.
+          mirrors="$(curl -fsS --max-time 10 https://ziglang.org/download/community-mirrors.txt || true)"
+          sources="$(printf '%s\n' "${mirrors}" | awk 'NF' | { shuf 2>/dev/null || cat; })"
+          while read -r base; do
+            [ -n "${base}" ] || continue
+            if curl -fsSL --max-time 120 -o "${tarball}" "${base}/${name}.tar.xz?source=mzdiff-ci" &&
+              echo "${sha}  ${tarball}" | shasum -a 256 -c --status; then
+              echo "Zig ${version} from ${base}"
+              break
+            fi
+            rm -f "${tarball}"
+          done <<< "${sources}
+          https://ziglang.org/download/${version}"
+          test -f "${tarball}" || { echo "::error::no source served a Zig ${version} tarball matching its checksum"; exit 1; }
+          tar -xJf "${tarball}" -C "${home}"
+          rm "${tarball}"
+        fi
+        echo "${home}/${name}" >> "${GITHUB_PATH}"
+        "${home}/${name}/zig" version

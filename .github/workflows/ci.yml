@@ -1,0 +1,69 @@
+name: CI
+
+# A pull request gets one x86_64 job: format, tool syntax, and the Debug tests. A push to main adds
+# the ReleaseFast build that ships and, while the repository is public, an aarch64 run on GitHub's
+# free arm64 runners. Changes to documentation alone start nothing.
+
+on:
+  push:
+    branches: [main]
+    paths-ignore: ["**.md", "LICENSE", "CITATION.cff", "assets/**", "wiki/**"]
+  pull_request:
+    branches: [main]
+    paths-ignore: ["**.md", "LICENSE", "CITATION.cff", "assets/**", "wiki/**"]
+  workflow_dispatch:
+
+permissions: {}
+
+concurrency:
+  group: ci-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  test:
+    name: x86_64-linux
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: $/.github/actions/setup-zig
+      - uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: zig-pkg
+          key: zig-pkg-${{ hashFiles('build.zig.zon') }}
+      - name: Format
+        run: zig fmt --check build.zig src
+      # The tools need real mzML and external programs to run; this checks that they parse.
+      - name: Tool syntax
+        run: |
+          python3 -m py_compile tools/consumer.py tools/mutate.py
+          bash -n tools/corpus.sh
+      - name: Test (Debug)
+        run: zig build test --summary all
+      - name: Test (ReleaseFast)
+        if: github.event_name != 'pull_request'
+        run: zig build test -Doptimize=ReleaseFast --summary all
+
+  aarch64:
+    name: aarch64-linux
+    if: github.event_name != 'pull_request' && !github.event.repository.private
+    needs: test
+    runs-on: ubuntu-24.04-arm
+    timeout-minutes: 15
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: $/.github/actions/setup-zig
+      - uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: zig-pkg
+          key: zig-pkg-${{ hashFiles('build.zig.zon') }}
+      - name: Test (Debug)
+        run: zig build test --summary all
