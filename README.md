@@ -1,4 +1,4 @@
-<!-- markdownlint-disable MD033 MD036 MD041 -->
+<!-- markdownlint-disable MD033 MD041 -->
 
 <p align="center">
   <img src="assets/logo-readme.svg" alt="mzDiff" width="180">
@@ -11,13 +11,15 @@
 <p align="center">
   <a href="https://github.com/eneskemalergin/mzDiff/actions/workflows/ci.yml"><img src="https://img.shields.io/github/actions/workflow/status/eneskemalergin/mzDiff/ci.yml?branch=main&amp;style=flat-square&amp;logo=github&amp;label=CI" alt="CI"></a>
   <a href="https://ziglang.org/download/"><img src="https://img.shields.io/badge/Zig-0.16.0-F7A41D?style=flat-square&amp;logo=zig&amp;logoColor=white" alt="Zig 0.16.0"></a>
-  <a href="#status"><img src="https://img.shields.io/badge/status-development-C17D10?style=flat-square" alt="Status: development"></a>
-  <a href="LICENSE"><img src="https://img.shields.io/badge/license-MIT-4B9D6E?style=flat-square" alt="License: MIT"></a>
+  <a href="#status-and-limits"><img src="https://img.shields.io/badge/status-development-C17D10?style=flat-square" alt="Status: development"></a>
+  <a href="#license"><img src="https://img.shields.io/badge/license-MIT-4B9D6E?style=flat-square" alt="License: MIT"></a>
 </p>
 
 <p align="center">
-  <a href="https://github.com/eneskemalergin/mzDiff/wiki/Usage">Usage</a> | <a href="https://github.com/eneskemalergin/mzDiff/wiki/What-mzdiff-compares">What it compares</a> | <a href="https://github.com/eneskemalergin/mzDiff/wiki/Severity">Severity</a> | <a href="https://github.com/eneskemalergin/mzDiff/wiki/Reading-a-report">Reading a report</a> | <a href="https://github.com/eneskemalergin/mzDiff/wiki/JSON-output">JSON output</a> | <a href="https://github.com/eneskemalergin/mzDiff/wiki/Development">Development</a>
+  <a href="#quick-start">Quick start</a> | <a href="#what-it-looks-like">Output</a> | <a href="#install">Install</a> | <a href="#documentation">Documentation</a> | <a href="#speed">Speed</a> | <a href="#status-and-limits">Status</a>
 </p>
+
+<!-- markdownlint-enable MD041 -->
 
 ---
 
@@ -186,15 +188,28 @@ zig build -Doptimize=ReleaseFast
 zig build test --summary all
 ```
 
-The binary is `zig-out/bin/mzdiff`. Only x86_64 Linux is tested.
+The binary is `zig-out/bin/mzdiff`, one static executable. See [Status and limits](#status-and-limits) for the platforms CI tests.
+
+## Documentation
+
+[The wiki](https://github.com/eneskemalergin/mzDiff/wiki) explains each part in depth: [usage](https://github.com/eneskemalergin/mzDiff/wiki/Usage), [output examples](https://github.com/eneskemalergin/mzDiff/wiki/Output-examples), [what mzdiff compares](https://github.com/eneskemalergin/mzDiff/wiki/What-mzdiff-compares), [severity](https://github.com/eneskemalergin/mzDiff/wiki/Severity), [reading a report](https://github.com/eneskemalergin/mzDiff/wiki/Reading-a-report), the [consumer check](https://github.com/eneskemalergin/mzDiff/wiki/Consumer-check) behind the severities, [JSON output](https://github.com/eneskemalergin/mzDiff/wiki/JSON-output), [untrusted input](https://github.com/eneskemalergin/mzDiff/wiki/Untrusted-input), and [development](https://github.com/eneskemalergin/mzDiff/wiki/Development).
+
+In this repository, `tools/` holds the checks behind the severities: `mutate.py` injects one defect at a time and checks that mzdiff reports it, `corpus.sh` compares converter outputs with a reference across many runs, and `consumer.py` runs a search engine on the same defects.
 
 ## Speed
 
 Each file is read and decoded on its own thread, and memory stays bounded by the records in flight, not the file. A 5.3 GiB Astral run (156,082 spectra) compares in 17.1 s with 20.5 MB peak RSS; a 2,103-spectrum PRM run in about 100 ms. [Development](https://github.com/eneskemalergin/mzDiff/wiki/Development#speed-and-memory) has the measurement details.
 
-## Status
+## Status and limits
 
-In development. The CLI may still change; the exit status, the TSV columns, and the JSON keys and kinds are what scripts should rely on.
+mzdiff is in development. The CLI may still change; the exit status, the TSV columns, and the JSON keys and kinds are what scripts should rely on. CI runs the tests on x86_64 and aarch64 Linux.
+
+Not supported yet:
+
+- formats other than mzML, and whole-file gzip (`.mzML.gz`);
+- Base64 broken across lines, which some readers refuse: mzdiff compares the decoded values and cannot see it yet.
+
+mzdiff judges B against A. What a file must be on its own (schema, vocabulary rules, index offsets, checksum) is [mzValidate](https://github.com/eneskemalergin/mzValidate)'s job.
 
 ## Related
 
@@ -206,8 +221,12 @@ In development. The CLI may still change; the exit status, the TSV columns, and 
 
 ## Contributing
 
-Bug reports, fixes, and ideas are welcome; [CONTRIBUTING.md](CONTRIBUTING.md) says how. Report security problems privately, as [SECURITY.md](SECURITY.md) describes. Changes between versions are in [CHANGELOG.md](CHANGELOG.md).
+Contributions are welcome; [CONTRIBUTING.md](CONTRIBUTING.md) says what a change needs before it is merged. Report security problems privately, as [SECURITY.md](SECURITY.md) describes. [CHANGELOG.md](CHANGELOG.md) lists what each version changes, and [CITATION.cff](CITATION.cff) says how to cite mzdiff.
 
 ## License
 
-MIT. See [LICENSE](LICENSE).
+mzdiff is licensed under the [MIT License](LICENSE), and so are its logo and icon.
+
+---
+
+<p align="center"><sub>Two files, the same run;<br>bytes disagree, meaning holds<br>until a peak drops.</sub></p>
