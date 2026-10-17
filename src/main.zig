@@ -134,7 +134,7 @@ pub fn main(init: std.process.Init) u8 {
     const style: output.Style = .{ .color = options.format == .text and useColor(io, init.environ_map, options.color) };
     const interactive = std.Io.File.stdout().isTty(io) catch false;
     var out_buffer: [64 * 1024]u8 = undefined;
-    var stdout = std.Io.File.stdout().writer(io, &out_buffer);
+    var stdout = std.Io.File.stdout().writerStreaming(io, &out_buffer);
     const out = &stdout.interface;
     var failure: output.Failure = .{};
     const status = run(allocator, arena, io, out, &rules, options, style, interactive, &failure) catch |err| {
