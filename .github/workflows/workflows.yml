@@ -2,11 +2,12 @@ name: Workflow checks
 
 on:
   push:
-    branches: [main, "release/**"]
+    branches: [main]
     paths: [".github/**"]
   pull_request:
     branches: [main]
     paths: [".github/**"]
+  workflow_dispatch:
 
 permissions: {}
 
