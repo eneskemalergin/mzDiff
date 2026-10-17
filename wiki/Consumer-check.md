@@ -10,47 +10,164 @@ Sage's outcome for the 200 spectra: **fatal** (the run fails or reads nothing), 
 
 ## Results
 
-| Defect in B | mzdiff | mzValidate | Sage |
-|---|---|---|---|
-| spectrum removed | critical | error | 200 lost |
-| spectrum written twice | critical | error | 200 reported twice |
-| charge changed | critical | valid | 110 lost, 90 wrong |
-| charge removed | critical | valid | 6 wrong, 4 shifted |
-| charge written `2.0` | critical (`form:integer`) | error | fatal |
-| selected ion m/z one isotope off | critical | valid | 1 lost, 70 wrong, 129 shifted |
-| selected ion m/z 10 ppm off | critical | valid | 4 lost, 191 wrong |
-| selected ion m/z 0.5 ppm off | minor (`ppm`) | valid | 200 shifted |
-| selected ion m/z removed | critical | valid | 2 wrong, 43 shifted |
-| isolation target 1 m/z off | critical | valid | none |
-| isolation offsets doubled | major | valid | none |
-| selected-ion intensity removed | major | valid | none |
-| `spectrumRef` removed | major | valid | none |
-| collision energy changed | major | valid | none |
-| ms level 2 written as 1 | critical | valid | 200 lost |
-| ms level written `2.0` | critical (`form:integer`) | error | fatal |
-| `centroid spectrum` removed | critical | error | fatal |
-| `centroid spectrum` changed to profile | critical | valid | fatal |
-| total ion current set to 0 | critical | valid | 200 lost |
-| total ion current doubled | major | valid | none |
-| filter string changed | major | valid | none |
-| injection time doubled | major | valid | none |
-| ms level taken through a parameter group | major (`form:paramGroup`) | valid | 200 lost |
-| scan start time unit dropped | critical | error | fatal |
-| scan start time in minutes, labelled seconds | critical | valid | 1 wrong, 199 shifted |
-| scan start time converted to seconds | same | valid | none |
-| scan start time one minute later | critical | valid | 200 shifted |
-| scan start time removed | critical | valid | 2 wrong, 198 shifted |
-| intensity array removed | critical | error | fatal |
-| most intense peak removed | critical | valid | 3 wrong, 95 shifted |
-| peaks in falling m/z order | major (`array:peaks`) | valid | 6 wrong, 192 shifted |
-| intensities stored as 32-bit | minor (`precision`) | valid | none |
-| m/z stored as 32-bit | minor (`precision`) | valid | none |
-| arrays uncompressed | same | valid | none |
-| m/z array in MS-Numpress | major (`form:numpress`) | error (Numpress is standard) | 200 lost |
-| base64 broken across lines | same (not yet visible) | valid | fatal |
-| `defaultArrayLength` one too high | fails to read (exit 3) | error | none |
-| native ids renamed | critical | error | none |
-| index removed | major (`indexed`) | valid | none |
+One item per injected defect:
+
+- **spectrum removed**
+  - mzdiff: critical
+  - mzValidate: error
+  - Sage: 200 lost
+- **spectrum written twice**
+  - mzdiff: critical
+  - mzValidate: error
+  - Sage: 200 reported twice
+- **charge changed**
+  - mzdiff: critical
+  - mzValidate: valid
+  - Sage: 110 lost, 90 wrong
+- **charge removed**
+  - mzdiff: critical
+  - mzValidate: valid
+  - Sage: 6 wrong, 4 shifted
+- **charge written `2.0`**
+  - mzdiff: critical (`form:integer`)
+  - mzValidate: error
+  - Sage: fatal
+- **selected ion m/z one isotope off**
+  - mzdiff: critical
+  - mzValidate: valid
+  - Sage: 1 lost, 70 wrong, 129 shifted
+- **selected ion m/z 10 ppm off**
+  - mzdiff: critical
+  - mzValidate: valid
+  - Sage: 4 lost, 191 wrong
+- **selected ion m/z 0.5 ppm off**
+  - mzdiff: minor (`ppm`)
+  - mzValidate: valid
+  - Sage: 200 shifted
+- **selected ion m/z removed**
+  - mzdiff: critical
+  - mzValidate: valid
+  - Sage: 2 wrong, 43 shifted
+- **isolation target 1 m/z off**
+  - mzdiff: critical
+  - mzValidate: valid
+  - Sage: none
+- **isolation offsets doubled**
+  - mzdiff: major
+  - mzValidate: valid
+  - Sage: none
+- **selected-ion intensity removed**
+  - mzdiff: major
+  - mzValidate: valid
+  - Sage: none
+- **`spectrumRef` removed**
+  - mzdiff: major
+  - mzValidate: valid
+  - Sage: none
+- **collision energy changed**
+  - mzdiff: major
+  - mzValidate: valid
+  - Sage: none
+- **ms level 2 written as 1**
+  - mzdiff: critical
+  - mzValidate: valid
+  - Sage: 200 lost
+- **ms level written `2.0`**
+  - mzdiff: critical (`form:integer`)
+  - mzValidate: error
+  - Sage: fatal
+- **`centroid spectrum` removed**
+  - mzdiff: critical
+  - mzValidate: error
+  - Sage: fatal
+- **`centroid spectrum` changed to profile**
+  - mzdiff: critical
+  - mzValidate: valid
+  - Sage: fatal
+- **total ion current set to 0**
+  - mzdiff: critical
+  - mzValidate: valid
+  - Sage: 200 lost
+- **total ion current doubled**
+  - mzdiff: major
+  - mzValidate: valid
+  - Sage: none
+- **filter string changed**
+  - mzdiff: major
+  - mzValidate: valid
+  - Sage: none
+- **injection time doubled**
+  - mzdiff: major
+  - mzValidate: valid
+  - Sage: none
+- **ms level taken through a parameter group**
+  - mzdiff: major (`form:paramGroup`)
+  - mzValidate: valid
+  - Sage: 200 lost
+- **scan start time unit dropped**
+  - mzdiff: critical
+  - mzValidate: error
+  - Sage: fatal
+- **scan start time in minutes, labelled seconds**
+  - mzdiff: critical
+  - mzValidate: valid
+  - Sage: 1 wrong, 199 shifted
+- **scan start time converted to seconds**
+  - mzdiff: same
+  - mzValidate: valid
+  - Sage: none
+- **scan start time one minute later**
+  - mzdiff: critical
+  - mzValidate: valid
+  - Sage: 200 shifted
+- **scan start time removed**
+  - mzdiff: critical
+  - mzValidate: valid
+  - Sage: 2 wrong, 198 shifted
+- **intensity array removed**
+  - mzdiff: critical
+  - mzValidate: error
+  - Sage: fatal
+- **most intense peak removed**
+  - mzdiff: critical
+  - mzValidate: valid
+  - Sage: 3 wrong, 95 shifted
+- **peaks in falling m/z order**
+  - mzdiff: major (`array:peaks`)
+  - mzValidate: valid
+  - Sage: 6 wrong, 192 shifted
+- **intensities stored as 32-bit**
+  - mzdiff: minor (`precision`)
+  - mzValidate: valid
+  - Sage: none
+- **m/z stored as 32-bit**
+  - mzdiff: minor (`precision`)
+  - mzValidate: valid
+  - Sage: none
+- **arrays uncompressed**
+  - mzdiff: same
+  - mzValidate: valid
+  - Sage: none
+- **m/z array in MS-Numpress**
+  - mzdiff: major (`form:numpress`)
+  - mzValidate: error (Numpress is standard)
+  - Sage: 200 lost
+- **base64 broken across lines**
+  - mzdiff: same (not yet visible)
+  - mzValidate: valid
+  - Sage: fatal
+- **`defaultArrayLength` one too high**
+  - mzdiff: fails to read (exit 3)
+  - mzValidate: error
+  - Sage: none
+- **native ids renamed**
+  - mzdiff: critical
+  - mzValidate: error
+  - Sage: none
+- **index removed**
+  - mzdiff: major (`indexed`)
+  - mzValidate: valid
+  - Sage: none
 
 ## What it shows
 

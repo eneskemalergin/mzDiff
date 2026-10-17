@@ -1,0 +1,1 @@
+[mzdiff](https://github.com/eneskemalergin/mzDiff) | [Changelog](https://github.com/eneskemalergin/mzDiff/blob/main/CHANGELOG.md) | [Contributing](https://github.com/eneskemalergin/mzDiff/blob/main/CONTRIBUTING.md) | [Security](https://github.com/eneskemalergin/mzDiff/blob/main/SECURITY.md) | MIT License

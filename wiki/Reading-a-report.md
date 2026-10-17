@@ -4,17 +4,33 @@ Each difference has a kind, and the kind says what the tool that wrote B did. Re
 
 ## What B did
 
-| B ... | Kinds | What to check in the tool that wrote B |
-|---|---|---|
-| left something out | `missing in B`, `record missing in B`, `array missing in B`, `count differs` (fewer) | a field it does not read or does not write; spectra it drops |
-| added something | `only in B`, `record only in B`, `array only in B`, `count differs` (more) | a field it invents, or one the reference tool leaves out (then B may be right) |
-| wrote another value | `value differs`, `unit differs`, `array length differs`, `array values differ` | a decoding or conversion error: scale, unit, offset, or a field read from the wrong place |
-| named another term | `another term` | a lookup table: which analyzer, polarity, or method the tool maps an instrument field to |
-| named a more specific term | `a more specific term` (minor) | usually nothing: B says more than A |
-| put things in another place | `values regrouped`, `in another order` (precursors), `records out of order`, `same peaks, other order` | how the tool groups precursors, orders spectra, or sorts peaks |
-| wrote the same data another way | `form:` keys | a valid or invalid form that readers fail on ([Form](What-mzdiff-compares#form)) |
-| matched within a tolerance | `last digit differs`, `equal at 32-bit precision`, `m/z within tolerance`, `array precision differs` (all minor) | nothing, unless the precision matters to you |
-| paired spectra by scan number | `paired ids differ` | the native id format the tool writes |
+- **B left something out**
+  - Kinds: `missing in B`, `record missing in B`, `array missing in B`, `count differs` (fewer)
+  - What to check: a field it does not read or does not write; spectra it drops
+- **B added something**
+  - Kinds: `only in B`, `record only in B`, `array only in B`, `count differs` (more)
+  - What to check: a field it invents, or one the reference tool leaves out (then B may be right)
+- **B wrote another value**
+  - Kinds: `value differs`, `unit differs`, `array length differs`, `array values differ`
+  - What to check: a decoding or conversion error: scale, unit, offset, or a field read from the wrong place
+- **B named another term**
+  - Kinds: `another term`
+  - What to check: a lookup table: which analyzer, polarity, or method the tool maps an instrument field to
+- **B named a more specific term**
+  - Kinds: `a more specific term` (minor)
+  - What to check: usually nothing: B says more than A
+- **B put things in another place**
+  - Kinds: `values regrouped`, `in another order` (precursors), `records out of order`, `same peaks, other order`
+  - What to check: how the tool groups precursors, orders spectra, or sorts peaks
+- **B wrote the same data another way**
+  - Kinds: `form:` keys
+  - What to check: a valid or invalid form that readers fail on ([Form](What-mzdiff-compares#form))
+- **B matched within a tolerance**
+  - Kinds: `last digit differs`, `equal at 32-bit precision`, `m/z within tolerance`, `array precision differs` (all minor)
+  - What to check: nothing, unless the precision matters to you
+- **B paired spectra by scan number**
+  - Kinds: `paired ids differ`
+  - What to check: the native id format the tool writes
 
 The reference can be wrong too. A difference says that B disagrees with A, not which one is right: when ThermoRawFileParser names an Orbitrap Eclipse's analyzer `fourier transform ion cyclotron resonance mass spectrometer` and the tool under test names it `orbitrap`, the report shows `another term`, and the tool under test is the one that is right.
 

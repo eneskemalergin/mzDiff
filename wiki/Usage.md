@@ -49,12 +49,12 @@ One at a time:
 
 With `--max-spectra`, the result is also marked `incomplete`.
 
-| Exit | Meaning |
-|---|---|
-| 0 | same, or tolerated: nothing at or above `--fail-on` differs |
-| 1 | differs |
-| 2 | usage error: the command is wrong; nothing was compared |
-| 3 | the comparison could not complete: a file is missing, unreadable, malformed, or cut short |
+The exit status:
+
+- `0`: same, or tolerated; nothing at or above `--fail-on` differs.
+- `1`: differs.
+- `2`: a usage error; the command is wrong and nothing was compared.
+- `3`: the comparison could not complete; a file is missing, unreadable, malformed, or cut short.
 
 The codes match mzValidate's. A run that cannot complete prints one line to stderr naming the side and the file (`mzdiff: B tool.mzML: no such file`), and never a partial report as if it were complete. With `--json` it also prints a JSON error object to stdout, so a pipeline always has JSON to read ([JSON output](JSON-output#errors)).
 

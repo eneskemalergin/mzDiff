@@ -9,20 +9,21 @@
 </p>
 
 <p align="center">
-  <img src="https://img.shields.io/badge/zig-0.16.0-F7A41D?style=flat-square&logo=zig&logoColor=white" alt="Zig 0.16.0">
-  <a href="LICENSE"><img src="https://img.shields.io/badge/license-MIT-4B9D6E?style=flat-square" alt="MIT"></a>
-  <img src="https://img.shields.io/badge/status-development-green?style=flat-square" alt="Status: development">
+  <a href="https://github.com/eneskemalergin/mzDiff/actions/workflows/ci.yml"><img src="https://img.shields.io/github/actions/workflow/status/eneskemalergin/mzDiff/ci.yml?branch=main&amp;style=flat-square&amp;logo=github&amp;label=CI" alt="CI"></a>
+  <a href="https://ziglang.org/download/"><img src="https://img.shields.io/badge/Zig-0.16.0-F7A41D?style=flat-square&amp;logo=zig&amp;logoColor=white" alt="Zig 0.16.0"></a>
+  <a href="#status"><img src="https://img.shields.io/badge/status-development-C17D10?style=flat-square" alt="Status: development"></a>
+  <a href="LICENSE"><img src="https://img.shields.io/badge/license-MIT-4B9D6E?style=flat-square" alt="License: MIT"></a>
 </p>
 
 <p align="center">
-  <a href="wiki/Usage.md">Usage</a> | <a href="wiki/What-mzdiff-compares.md">What it compares</a> | <a href="wiki/Severity.md">Severity</a> | <a href="wiki/Reading-a-report.md">Reading a report</a> | <a href="wiki/JSON-output.md">JSON output</a> | <a href="wiki/Development.md">Development</a>
+  <a href="https://github.com/eneskemalergin/mzDiff/wiki/Usage">Usage</a> | <a href="https://github.com/eneskemalergin/mzDiff/wiki/What-mzdiff-compares">What it compares</a> | <a href="https://github.com/eneskemalergin/mzDiff/wiki/Severity">Severity</a> | <a href="https://github.com/eneskemalergin/mzDiff/wiki/Reading-a-report">Reading a report</a> | <a href="https://github.com/eneskemalergin/mzDiff/wiki/JSON-output">JSON output</a> | <a href="https://github.com/eneskemalergin/mzDiff/wiki/Development">Development</a>
 </p>
 
 ---
 
 mzdiff compares a reference mzML (A) with an output under test (B) and reports every difference that changes what a reader would get, classed as critical, major, or minor. I built it to check [mzBridge](https://github.com/eneskemalergin/mzBridge), my native Thermo `.raw` converter, against the ThermoRawFileParser mzML of the same run. It checks other converters the same way.
 
-Two converters never write the same bytes: ids, offsets, number spelling, parameter order, and software names all differ. mzdiff ignores that bookkeeping by rule and compares what is left: every spectrum and chromatogram, paired in any order; every attribute, cvParam, and userParam; the decoded arrays; and the header. A difference it fails to report is its worst defect, so every check has a case in a defect harness that shows it can fail, and the severities were checked against what a search engine does with each defect ([Consumer check](wiki/Consumer-check.md)).
+Two converters never write the same bytes: ids, offsets, number spelling, parameter order, and software names all differ. mzdiff ignores that bookkeeping by rule and compares what is left: every spectrum and chromatogram, paired in any order; every attribute, cvParam, and userParam; the decoded arrays; and the header. A difference it fails to report is its worst defect, so every check has a case in a defect harness that shows it can fail, and the severities were checked against what a search engine does with each defect ([Consumer check](https://github.com/eneskemalergin/mzDiff/wiki/Consumer-check)).
 
 It also reports where B writes the same data in a form readers fail on (a charge written `2.0`, parameters moved into a group, Numpress arrays), since a file that matches the reference value for value can still break a search engine. What a file must be on its own (index offsets, checksum, schema, vocabulary) is left to [mzValidate](https://github.com/eneskemalergin/mzValidate).
 
@@ -56,7 +57,7 @@ controllerType=0 controllerNumber=1 scan=5
 complete: differs | classes: critical 0, major 11, minor 14 | spectra: A 2103, B 2103, paired 2103 | chromatograms: A 1, B 2, paired 1
 ```
 
-The verdict is `same`, `tolerated` (nothing at or above `--fail-on`, default `major`), or `differs`. Exit status 0 for same or tolerated, 1 for differs, 2 for a usage error, and 3 when the comparison cannot complete (a file missing, unreadable, or cut short), as for mzValidate. [Usage](wiki/Usage.md) covers every mode, format, and option, and [Reading a report](wiki/Reading-a-report.md) what each kind of difference says about the tool that wrote B.
+The verdict is `same`, `tolerated` (nothing at or above `--fail-on`, default `major`), or `differs`. Exit status 0 for same or tolerated, 1 for differs, 2 for a usage error, and 3 when the comparison cannot complete (a file missing, unreadable, or cut short), as for mzValidate. [Usage](https://github.com/eneskemalergin/mzDiff/wiki/Usage) covers every mode, format, and option, and [Reading a report](https://github.com/eneskemalergin/mzDiff/wiki/Reading-a-report) what each kind of difference says about the tool that wrote B.
 
 ## Install
 
@@ -73,7 +74,7 @@ The binary is `zig-out/bin/mzdiff`. Only x86_64 Linux is tested.
 
 ## Speed
 
-Each file is read and decoded on its own thread, and memory stays bounded by the records in flight, not the file. A 5.3 GiB Astral run (156,082 spectra) compares in 17.1 s with 20.5 MB peak RSS; a 2,103-spectrum PRM run in about 100 ms. [Development](wiki/Development.md#speed-and-memory) has the measurement details.
+Each file is read and decoded on its own thread, and memory stays bounded by the records in flight, not the file. A 5.3 GiB Astral run (156,082 spectra) compares in 17.1 s with 20.5 MB peak RSS; a 2,103-spectrum PRM run in about 100 ms. [Development](https://github.com/eneskemalergin/mzDiff/wiki/Development#speed-and-memory) has the measurement details.
 
 ## Status
 
@@ -86,6 +87,10 @@ In development. The CLI may still change; the exit status, the TSV columns, and 
 - [mzValidate](https://github.com/eneskemalergin/mzValidate): validates each file on its own
 - [mzBridge](https://github.com/eneskemalergin/mzBridge): the converter mzdiff was built to check
 - [ThermoRawFileParser](https://github.com/CompOmics/ThermoRawFileParser): the reference for Thermo `.raw` files
+
+## Contributing
+
+Bug reports, fixes, and ideas are welcome; [CONTRIBUTING.md](CONTRIBUTING.md) says how. Report security problems privately, as [SECURITY.md](SECURITY.md) describes. Changes between versions are in [CHANGELOG.md](CHANGELOG.md).
 
 ## License
 
