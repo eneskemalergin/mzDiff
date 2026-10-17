@@ -12,6 +12,7 @@ mzdiff --view --html A.mzML B.mzML > diff.html    # the differing records as an 
 ## Pages
 
 - [Usage](Usage): modes, formats, selection, the view and the page, and the exit status.
+- [Output examples](Output-examples): every mode and format on one real pair of files.
 - [What mzdiff compares](What-mzdiff-compares): what is compared, what is ignored, tolerances, and form.
 - [Severity](Severity): what critical, major, and minor mean, which keys are which, and `--set`.
 - [Reading a report](Reading-a-report): what each kind of difference says about the tool that wrote B.

@@ -38,6 +38,97 @@ mzdiff --view --html A.mzML B.mzML > diff.html    # the same, as an interactive 
 mzdiff -q A.mzML B.mzML && echo "nothing that matters differs"
 ```
 
+## What it looks like
+
+A PRM run from PRIDE [PXD006618](https://www.ebi.ac.uk/pride/archive/projects/PXD006618), converted by ThermoRawFileParser (A) and by the [mzdata](https://github.com/mobiusklein/mzdata) converter (B):
+
+```text
+$ mzdiff --severity major --examples 1 trfp.mzML mzdata.mzML
+A  trfp.mzML  (ThermoRawFileParser)
+B  mzdata.mzML  (thermo_xcalibur)
+spectra        A 2103  B 2103  paired 2103
+chromatograms  A 1  B 2  paired 1
+result         differs: 0 critical, 11 major, 14 minor difference classes
+
+MAJOR
+      2103  value differs              spectrum/precursor/isolationWindow  MS:1000828 (isolation window lower offset)
+            controllerType=0 controllerNumber=1 scan=1  A: 0.7  B: 1.4000244
+      2103  value differs              spectrum/precursor/isolationWindow  MS:1000829 (isolation window upper offset)
+            controllerType=0 controllerNumber=1 scan=1  A: 0.7  B: 1.4000244
+      2103  only in B                  spectrum/precursor/selectedIon  MS:1000042 (peak intensity)
+            controllerType=0 controllerNumber=1 scan=1  A: -  B: 0
+      2103  only in B                  spectrum/scan/instrumentConfiguration/analyzer  MS:1000081 (quadrupole)
+            controllerType=0 controllerNumber=1 scan=1
+      2014  value differs              spectrum  MS:1000285 (total ion current)
+            controllerType=0 controllerNumber=1 scan=1  A: 15869.6875  B: 15869.7529296875
+         1  record only in B           chromatogram  @id (chromatogram)
+            TIC  A: -  B: TIC
+         1  missing in B               mzML/fileDescription/fileContent  MS:1000810 (ion current chromatogram)
+            header
+         1  only in B                  mzML/instrumentConfiguration/analyzer  MS:1000081 (quadrupole)
+            header
+         1  only in B                  mzML/instrumentConfiguration/analyzer  MS:1000083 (radial ejection linear ion trap)
+            header
+         1  only in B                  mzML/instrumentConfiguration/detector  MS:1000253 (electron multiplier)
+            header
+         1  missing in B               run  @startTimeStamp
+            header  A: 2015-10-14T03:22:49.63Z  B: -
+
+11 of 25 classes shown (--severity, --key)
+```
+
+<details>
+<summary>The summary, as text, TSV, and JSON</summary>
+
+```text
+$ mzdiff --summary trfp.mzML mzdata.mzML
+complete: differs | classes: critical 0, major 11, minor 14 | spectra: A 2103, B 2103, paired 2103 | chromatograms: A 1, B 2, paired 1
+
+$ mzdiff --summary --tsv trfp.mzML mzdata.mzML
+completion	status	fail_on	critical	major	minor	a_spectra	b_spectra	paired_spectra	a_chromatograms	b_chromatograms	paired_chromatograms
+complete	differs	major	0	11	14	2103	2103	2103	1	2	1
+
+$ mzdiff --summary --json trfp.mzML mzdata.mzML
+{
+  "schema_version": 1,
+  "tool": {"name": "mzdiff", "version": "0.1.0"},
+  "a": {"path": "trfp.mzML", "software": "ThermoRawFileParser", "spectra": 2103, "chromatograms": 1},
+  "b": {"path": "mzdata.mzML", "software": "thermo_xcalibur", "spectra": 2103, "chromatograms": 2},
+  "paired": {"spectra": 2103, "chromatograms": 1},
+  "completion": "complete",
+  "status": "differs",
+  "fail_on": "major",
+  "totals": {"critical": 0, "major": 11, "minor": 14}
+}
+```
+
+</details>
+
+<details>
+<summary>The list</summary>
+
+```text
+$ mzdiff --list --severity major --limit 8 trfp.mzML mzdata.mzML
+header
+  MAJOR    missing in B               mzML/fileDescription/fileContent  MS:1000810 (ion current chromatogram)
+  MAJOR    only in B                  mzML/instrumentConfiguration/analyzer  MS:1000081 (quadrupole)
+  MAJOR    only in B                  mzML/instrumentConfiguration/analyzer  MS:1000083 (radial ejection linear ion trap)
+  MAJOR    only in B                  mzML/instrumentConfiguration/detector  MS:1000253 (electron multiplier)
+  MAJOR    missing in B               run  @startTimeStamp  A: 2015-10-14T03:22:49.63Z  B: -
+controllerType=0 controllerNumber=1 scan=1
+  MAJOR    value differs              spectrum  MS:1000285 (total ion current)  A: 15869.6875  B: 15869.7529296875
+  MAJOR    value differs              spectrum/precursor/isolationWindow  MS:1000828 (isolation window lower offset)  A: 0.7  B: 1.4000244
+  MAJOR    value differs              spectrum/precursor/isolationWindow  MS:1000829 (isolation window upper offset)  A: 0.7  B: 1.4000244
+
+10424 more differences not shown (--limit)
+complete: differs | classes: critical 0, major 11, minor 14 | spectra: A 2103, B 2103, paired 2103 | chromatograms: A 1, B 2, paired 1
+```
+
+</details>
+
+<details>
+<summary>The view, unified and side by side</summary>
+
 ```text
 $ mzdiff --view --severity major --record "controllerType=0 controllerNumber=1 scan=5" trfp.mzML mzdata.mzML
 controllerType=0 controllerNumber=1 scan=5
@@ -55,7 +146,32 @@ controllerType=0 controllerNumber=1 scan=5
   + quadrupole                                                    MAJOR only in B
 
 complete: differs | classes: critical 0, major 11, minor 14 | spectra: A 2103, B 2103, paired 2103 | chromatograms: A 1, B 2, paired 1
+
+$ mzdiff --view --side-by-side --width 110 --severity major --record "controllerType=0 controllerNumber=1 scan=5" trfp.mzML mzdata.mzML
+controllerType=0 controllerNumber=1 scan=5
+                                           A                | B
+  spectrum
+  total ion current                        17442.453125     | 17442.513671875   MAJOR value differs
+  spectrum/precursor/isolationWindow
+  isolation window lower offset            0.7              | 1.4000244         MAJOR value differs
+  isolation window upper offset            0.7              | 1.4000244         MAJOR value differs
+  spectrum/precursor/selectedIon
+  peak intensity                           -                | 0                 MAJOR only in B
+  spectrum/scan/instrumentConfiguration/analyzer
+  quadrupole                               -                | (present)         MAJOR only in B
+
+complete: differs | classes: critical 0, major 11, minor 14 | spectra: A 2103, B 2103, paired 2103 | chromatograms: A 1, B 2, paired 1
 ```
+
+</details>
+
+`--view --html` writes the same view as one self-contained page with filters and search:
+
+<p align="center">
+  <img src="assets/html-view.png" alt="The mzdiff page for one record of the PRM pair" width="900">
+</p>
+
+[Output examples](https://github.com/eneskemalergin/mzDiff/wiki/Output-examples) shows every mode and format on this pair, including a tolerated run and a run that cannot complete.
 
 The verdict is `same`, `tolerated` (nothing at or above `--fail-on`, default `major`), or `differs`. Exit status 0 for same or tolerated, 1 for differs, 2 for a usage error, and 3 when the comparison cannot complete (a file missing, unreadable, or cut short), as for mzValidate. [Usage](https://github.com/eneskemalergin/mzDiff/wiki/Usage) covers every mode, format, and option, and [Reading a report](https://github.com/eneskemalergin/mzDiff/wiki/Reading-a-report) what each kind of difference says about the tool that wrote B.
 

@@ -1,5 +1,6 @@
 - [Home](Home)
 - [Usage](Usage)
+- [Output examples](Output-examples)
 - [What mzdiff compares](What-mzdiff-compares)
 - [Severity](Severity)
 - [Reading a report](Reading-a-report)
