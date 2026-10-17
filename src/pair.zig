@@ -1,8 +1,9 @@
 //! Pairs the records of the two sides and compares each pair. Spectra pair by native id in any
 //! vendor's format (by scan number when the two files' formats differ, by position when neither
 //! works) through a bounded join that assumes no order: each spectrum waits in its side's table
-//! until the other side yields the same key, and beyond `WINDOW` waiting spectra the oldest are
-//! reported missing or extra. Chromatograms pair by type and id once the spectra are done.
+//! until the other side yields the same key, and beyond `WINDOW` waiting records or `WINDOW_BYTES`
+//! the oldest are reported missing or extra. Chromatograms pair by id through the same join, then
+//! the leftovers by type.
 
 const std = @import("std");
 
@@ -13,8 +14,6 @@ const Item = read.Item;
 const Kind = compare.Kind;
 const Report = compare.Report;
 
-// How spectra pair: by the whole native id when both files use the same id fields (any vendor's
-// format), by the scan number when the formats differ but both have one, else by position.
 const KeyKind = enum { id, scan, position };
 
 fn keyKind(a: ?Item, b: ?Item) KeyKind {
@@ -26,8 +25,6 @@ fn keyKind(a: ?Item, b: ?Item) KeyKind {
     return .position;
 }
 
-// Whether two native ids have the same field names in the same order: "controllerType=0
-// controllerNumber=1 scan=5" and "controllerType=0 controllerNumber=1 scan=9" do.
 fn sameIdFields(a: []const u8, b: []const u8) bool {
     var fields_a = std.mem.tokenizeScalar(u8, a, ' ');
     var fields_b = std.mem.tokenizeScalar(u8, b, ' ');
@@ -41,8 +38,6 @@ fn sameIdFields(a: []const u8, b: []const u8) bool {
     }
 }
 
-// The pairing key of a spectrum, in its item's arena. Without a scan number when pairing by scan,
-// the whole id stands in, so the spectrum pairs only with one of the same id.
 fn pairingKey(item: *const Item, kind: KeyKind) ![]const u8 {
     const arena = item.arena.allocator();
     return switch (kind) {
@@ -55,17 +50,13 @@ fn pairingKey(item: *const Item, kind: KeyKind) ![]const u8 {
     };
 }
 
-// Spectra of one side waiting for a partner with the same key, oldest first. Files in step keep
-// one waiting; `WINDOW` bounds the rest.
 const Pending = struct {
     const Waiting = struct { item: Item, seq: u64, bytes: usize };
     const Entry = struct { key: []u8, seq: u64 };
 
     waiting: std.StringHashMapUnmanaged(Waiting) = .empty,
-    // Arrival order; entries whose spectrum was paired since are dropped as they reach the head.
     queue: std.ArrayList(Entry) = .empty,
     head: usize = 0,
-    // What the waiting spectra hold, by their arenas' capacity.
     bytes: usize = 0,
 
     fn contains(self: *const Pending, key: []const u8) bool {
@@ -93,8 +84,6 @@ const Pending = struct {
         return found.value.item;
     }
 
-    /// Whether the oldest waiting spectrum should give up: past `WINDOW` spectra, or past
-    /// `WINDOW_BYTES` with more than one waiting (the newest always waits for its partner).
     fn full(self: *const Pending) bool {
         return self.count() > WINDOW or (self.count() > 1 and self.bytes > WINDOW_BYTES);
     }
@@ -133,19 +122,13 @@ const Pending = struct {
     }
 };
 
-// Spectra waiting for a partner beyond this many, or holding more than this much memory, on one
-// side are reported missing or extra, oldest first: however different two files are, the join
-// holds a bounded amount.
 const WINDOW = 1024;
 const WINDOW_BYTES = 64 << 20;
 
 pub const Counts = struct { spectra: usize = 0, chromatograms: usize = 0, stopped_early: bool = false };
 
-/// Pairs and compares every record the two streams yield, filing differences in `report`; stops
-/// after `max_spectra` pairs when given. Leaves each stream's current item for the caller to free.
 pub fn run(allocator: std.mem.Allocator, report: *Report, a: *read.Stream, b: *read.Stream, max_spectra: ?usize) !Counts {
     var counts: Counts = .{};
-    // Chromatograms left without a partner by id, for the pass by type; bounded by the window.
     var kept: std.ArrayList(Item) = .empty;
     defer {
         for (kept.items) |item| item.free(allocator);
@@ -198,7 +181,6 @@ pub fn run(allocator: std.mem.Allocator, report: *Report, a: *read.Stream, b: *r
                     comparePair(report, scratch, kind, x, y, &last) catch |err| return err;
                     counts.spectra += 1;
                 } else if (entry[1].contains(key)) {
-                    // Its key repeats on its own side: it can pair only once.
                     defer item.free(allocator);
                     reportUnpaired(report, item, in_a) catch |err| return err;
                 } else {
@@ -216,15 +198,12 @@ pub fn run(allocator: std.mem.Allocator, report: *Report, a: *read.Stream, b: *r
         }
     }
     if (counts.stopped_early) return counts;
-    // Spectra that never found a partner, each side in its file order.
     inline for (.{ .{ &pending_a, true }, .{ &pending_b, false } }) |entry| {
         while (entry[0].oldest(allocator)) |item| {
             defer item.free(allocator);
             reportUnpaired(report, item, entry[1]) catch |err| return err;
         }
     }
-    // Chromatograms, through the same bounded join keyed by id; a spectrum after them (out of
-    // place in mzML) is reported unpaired.
     while (a.current != null or b.current != null) {
         inline for (.{ .{ a, &chromatograms_a, &chromatograms_b, true }, .{ b, &chromatograms_b, &chromatograms_a, false } }) |entry| {
             const stream = entry[0];
@@ -261,8 +240,6 @@ pub fn run(allocator: std.mem.Allocator, report: *Report, a: *read.Stream, b: *r
             }
         }
     }
-    // The rest pair by type when it is a type both sides have once more (TIC with TIC whatever
-    // its id); the window keeps them few.
     inline for (.{ .{ &chromatograms_a, &kept }, .{ &chromatograms_b, &kept_b } }) |entry| {
         while (entry[0].oldest(allocator)) |item| {
             entry[1].append(allocator, item) catch |err| {
@@ -276,8 +253,6 @@ pub fn run(allocator: std.mem.Allocator, report: *Report, a: *read.Stream, b: *r
     return counts;
 }
 
-// Compares one pair of spectra. A pair whose positions run against the previous pair's (one file
-// forward, the other back) is filed as out of order; the pair itself is still compared.
 fn comparePair(report: *Report, scratch: std.mem.Allocator, kind: KeyKind, x: Item, y: Item, last: *?[2]usize) !void {
     if (last.*) |previous| if ((x.position > previous[0]) != (y.position > previous[1])) {
         var ta: [32]u8 = undefined;
@@ -301,8 +276,6 @@ fn comparePair(report: *Report, scratch: std.mem.Allocator, kind: KeyKind, x: It
     try compare.compareArrays(report, scratch, x.id, "spectrum", x.arrays, y.arrays);
 }
 
-// A missing or extra spectrum is critical; a chromatogram, which summarises spectra compared
-// themselves, is major.
 fn reportUnpaired(report: *Report, item: Item, in_a: bool) !void {
     report.record += 1;
     const kind: Kind = if (in_a) .record_missing else .record_extra;
@@ -318,8 +291,6 @@ fn compareChromatogram(report: *Report, scratch: std.mem.Allocator, x: Item, y: 
     try compare.compareArrays(report, scratch, x.id, "chromatogram", x.arrays, y.arrays);
 }
 
-// Pairs the chromatograms no id matched by their type (TIC with TIC whatever the id); reports the
-// rest unpaired. Returns how many pairs it compared.
 fn pairByType(report: *Report, scratch: std.mem.Allocator, a: []Item, b: []Item) !usize {
     var paired: usize = 0;
     for (a) |*x| {

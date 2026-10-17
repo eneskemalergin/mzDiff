@@ -1,19 +1,12 @@
-//! mzdiff: compares two mzML files by what they mean, fast, in one forward pass over both.
+//! mzdiff: compares a reference mzML (A) with an output under test (B) by meaning.
 //!
-//! A is the reference (usually TRFP's mzML next to the .raw), B the output under test. Spectra
-//! pair by native id in any vendor's format (by scan number when the formats differ, by position
-//! when neither works) through a bounded join that needs no order, so a spectrum missing or moved
-//! on one side is reported once and the pairs around it stay correct. Chromatograms pair by id
-//! through the same join, then the leftovers by type. The headers are compared too, without the parts that differ
-//! between tools by design (cvList, softwareList, dataProcessingList, ids, file locations), and
-//! an indexed file's trailer must be complete.
+//! Parses the command line, opens both files, and reads each on its own thread while this thread
+//! pairs records (`pair.zig`), compares them (`compare.zig`), and renders the result
+//! (`output.zig`, `html.zig`). Headers compare without the parts tools write differently by
+//! design, and an indexed file's trailer must be complete. Memory stays bounded by the queue depth.
 //!
-//! Each difference is filed under a class with a severity (see `rules.zig`): critical, major,
-//! minor, or ignored. Output lists the classes, most severe and most frequent first, with
-//! examples. Each file is read and decoded on its own thread, so the two inputs are parsed at
-//! the same time; memory stays bounded by the queue depth. Exit status: 0 when nothing at or
-//! above `--fail-on` (default major) differs, 1 when something does, 2 for a usage error, and 3
-//! when the comparison cannot complete (a file cannot be read), as for mzValidate.
+//! Exit status: 0 when nothing at or above `--fail-on` (default major) differs, 1 when something
+//! does, 2 for a usage error, and 3 when the comparison cannot complete.
 
 const std = @import("std");
 const zmz = @import("zmz");
@@ -145,12 +138,8 @@ pub fn main(init: std.process.Init) u8 {
     const out = &stdout.interface;
     var failure: output.Failure = .{};
     const status = run(allocator, arena, io, out, &rules, options, style, interactive, &failure) catch |err| {
-        // A reader that closed the pipe (`| head`) has what it wanted.
         if (err == error.WriteFailed and brokenPipe(&stdout)) return 0;
         if (failure.name.len == 0) failure = .{ .name = @errorName(err), .message = describe(err) };
-        // JSON output says it is incomplete in JSON, so a pipeline never parses an empty or cut
-        // stream as a result: the whole document for the report and summary, the last line for
-        // --list.
         if (options.format == .json) output.writeErrorJson(out, failure) catch {};
         out.flush() catch {};
         if (failure.side) |side|
@@ -170,7 +159,6 @@ fn sideName(side: @FieldType(output.Failure, "side")) []const u8 {
     };
 }
 
-// A sentence for an error that came without a diagnostic.
 fn describe(err: anyerror) []const u8 {
     return switch (err) {
         error.FileNotFound => "no such file",
@@ -182,8 +170,6 @@ fn describe(err: anyerror) []const u8 {
     };
 }
 
-// Files a side's failure: its path, the error, and the reader's diagnostic when there is one,
-// copied out of the side, which `run` frees.
 fn blame(failure: *output.Failure, arena: std.mem.Allocator, side: @FieldType(output.Failure, "side"), path: []const u8, reason: []const u8, err: anyerror) anyerror {
     failure.* = .{
         .side = side,
@@ -194,7 +180,6 @@ fn blame(failure: *output.Failure, arena: std.mem.Allocator, side: @FieldType(ou
     return err;
 }
 
-// The side-by-side width: COLUMNS when the shell exports it, else 160.
 fn terminalWidth(environ: *const std.process.Environ.Map) usize {
     const text = environ.get("COLUMNS") orelse return 160;
     const width = std.fmt.parseInt(usize, text, 10) catch return 160;
@@ -206,8 +191,6 @@ fn brokenPipe(writer: *const std.Io.File.Writer) bool {
     return err == error.BrokenPipe;
 }
 
-// mzValidate's rules: a nonempty NO_COLOR wins, then a nonempty CLICOLOR_FORCE, then a terminal
-// whose TERM is not "dumb".
 fn useColor(io: std.Io, environ: *const std.process.Environ.Map, color: Color) bool {
     switch (color) {
         .always => return true,
@@ -225,7 +208,6 @@ const Parser = struct {
     i: usize = 1,
     arena: std.mem.Allocator,
     problem: *[]const u8,
-    // The value joined to the current option (--limit=10), until taken.
     joined: ?[]const u8 = null,
 
     fn fail(self: *Parser, comptime fmt: []const u8, values: anytype) error{Usage} {
@@ -248,7 +230,6 @@ const Parser = struct {
         return std.fmt.parseInt(usize, text, 10) catch self.fail("{s} takes a whole number, not '{s}'", .{ flag, text });
     }
 
-    // `--set` may ignore a key; `--severity` and `--fail-on` take only the three levels.
     fn level(self: *Parser, flag: []const u8, text: []const u8, ignored: bool) error{Usage}!Severity {
         const levels = if (ignored) "critical, major, minor, or ignored" else "critical, major, or minor";
         const found = std.meta.stringToEnum(Severity, text) orelse
@@ -284,7 +265,6 @@ fn parse(arena: std.mem.Allocator, args: []const []const u8, rules: *Rules, prob
             file_count += 1;
             continue;
         }
-        // --option=VALUE is --option VALUE.
         if (std.mem.startsWith(u8, arg, "--")) if (std.mem.indexOfScalar(u8, arg, '=')) |eq| {
             p.joined = arg[eq + 1 ..];
             arg = arg[0..eq];
@@ -436,8 +416,6 @@ fn run(
     defer page.deinit();
     if (options.selection.limit) |limit| page.tally.records = limit;
     if (options.mode == .view) report.sink = if (options.format == .html) page.sink() else viewer.sink();
-    // B's broken index trailer is a difference, reported whether or not the header is compared; the
-    // reference's is only worth a warning.
     if (side_b.trailer) |problem|
         try report.add(
             null,
@@ -461,14 +439,12 @@ fn run(
         try compare.collect(arena, rules, &facts_b, side_b.header.document, "", side_b.header.groups, &HEADER_SKIP);
         try collectRun(arena, rules, &facts_a, side_a.header);
         try collectRun(arena, rules, &facts_b, side_b.header);
-        // The random-access index, when the reference has one; an index only in B loses nothing.
         if (side_a.header.indexed and !side_b.header.indexed)
             try report.add(null, .value, "indexedmzML", "indexed", "index", "header", "yes", "no");
         try compare.diffFacts(&report, "header", compare.dedupe(facts_a.items), compare.dedupe(facts_b.items));
     }
 
     const started = std.Io.Timestamp.now(io, .awake);
-    // Each side is read, decoded, and reduced on its own thread; this thread pairs and compares.
     var future_a = try io.concurrent(read.produce, .{ allocator, io, side_a });
     var future_b = io.concurrent(read.produce, .{ allocator, io, side_b }) catch |err| {
         side_a.queue.close(io);
@@ -481,7 +457,6 @@ fn run(
 
     const consumed = pair.run(allocator, &report, &a, &b, options.max_spectra);
 
-    // Stop the readers (a no-op when they finished), free what they queued, and wait for them.
     side_a.queue.close(io);
     side_b.queue.close(io);
     if (a.current) |item| item.free(allocator);
@@ -495,7 +470,6 @@ fn run(
     if (side_b.failure) |err| return blame(failure, arena_outer, .b, options.b, side_b.reason, err);
 
     const elapsed = std.Io.Timestamp.now(io, .awake).toNanoseconds() - started.toNanoseconds();
-    // Nothing to pair is never a pass worth trusting.
     if (side_a.spectra == 0 and side_a.chromatograms == 0) std.debug.print(
         "mzdiff: A {s}: holds no spectra or chromatograms\n",
         .{side_a.path},
@@ -525,7 +499,6 @@ fn run(
         .view => if (options.format == .html) try page.finish(outcome) else try viewer.finish(outcome),
         .quiet => {},
     }
-    // Only the text forms say so themselves.
     if (counts.stopped_early and options.format != .text and options.mode != .quiet) std.debug.print(
         "mzdiff: stopped after {d} paired spectra (--max-spectra); the result is incomplete\n",
         .{counts.spectra},

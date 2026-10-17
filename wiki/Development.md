@@ -11,7 +11,7 @@ zig build run -- A.mzML B.mzML             # build and run in one step
 
 The tests sit beside the code in `src/` and build their inputs in memory. Real files are used only by the tools below.
 
-zmz comes from its release, pinned by URL and hash in `build.zig.zon`. To build against a zmz checkout instead, pass it as a fork; nothing in the repository changes:
+zmz comes from its release, pinned by URL and hash in `build.zig.zon`; that pin and the Zig checksums in `.github/actions/setup-zig` are updated by hand, and Dependabot proposes updates to the GitHub Actions monthly. To build against a zmz checkout instead, pass it as a fork; nothing in the repository changes:
 
 ```bash
 zig build test --fork=../zmz
@@ -37,7 +37,7 @@ A difference mzdiff fails to report is its worst defect, so every check has a ca
 tools/mutate.py zig-out/bin/mzdiff REFERENCE.mzML [CASE...]
 ```
 
-It exits 0 only when every case that applies behaves as expected; a case whose structure the reference lacks is skipped. Two public PRIDE datasets cover every case between them: the PRM run in PXD006618 (single precursors) and an MS3 run in PXD070648 (two precursors per spectrum). Use the ThermoRawFileParser mzML of each.
+Each case names the key of the critical or major class it must raise (`KEY (KIND)` when the kind matters too), `exit 3` when the file must fail to read, `minor:KIND` when it must raise that minor kind and nothing more serious (a tolerance at work), or nothing when B must compare exactly the same. An edit that shifts bytes also breaks the index offset, so the `indexListOffset` class is ignored unless the case is about the trailer. It exits 0 only when every case that applies behaves as expected; a case whose structure the reference lacks is skipped. Two public PRIDE datasets cover every case between them: the PRM run in PXD006618 (single precursors) and an MS3 run in PXD070648 (two precursors per spectrum). Use the ThermoRawFileParser mzML of each.
 
 A new check gets its harness case first.
 
@@ -64,7 +64,7 @@ tools/corpus.sh -o /var/tmp/after -b /var/tmp/before
 
 ## Consumer runs
 
-`tools/consumer.py` checks the severities against a real consumer: the Sage search engine that mzBridge's `tools/install.sh` builds. It injects one defect at a time into the spectra Sage identifies in a reference (200 rank-1 matches at 1% FDR, spread over the run), then runs mzdiff, mzValidate, and Sage on the result. Each case ends as `fatal` (Sage fails or reads nothing), `lost` (edited spectra vanish from its results), `wrong` (another peptide or charge, a lost 1% match, or a spectrum reported twice), `shifted` (other scores, times, or masses), or `none`, beside mzdiff's most severe class and mzValidate's error rules. A case is flagged `MISSED` when Sage is hurt and neither tool says major or an error. The last run's results are on [Consumer check](Consumer-check).
+`tools/consumer.py` checks the severities against a real consumer: the Sage search engine that mzBridge's `tools/install.sh` builds. It injects one defect at a time into the spectra Sage identifies in a reference (200 rank-1 matches at 1% FDR, spread over the run), then runs mzdiff, mzValidate, and Sage on the result. Each case ends as `fatal` (Sage fails or reads nothing), `lost` (edited spectra vanish from its results), `wrong` (another peptide or charge, a lost 1% match, or a spectrum reported twice), `shifted` (other scores, times, or masses), or `none`, beside mzdiff's most severe class and mzValidate's error rules. A case is flagged `MISSED` when Sage is hurt (fatal, lost, or wrong) and neither tool says major or an error, `UNDER` when Sage fails or loses spectra and mzdiff says only major, and `STRICT` when mzdiff says critical and Sage is unaffected (other consumers may still be). The `indexListOffset` class and mzValidate's index rules are left out of the verdicts, since every edit shifts bytes. Results go to `OUT/consumer.tsv`. The last run's results are on [Consumer check](Consumer-check).
 
 ```bash
 tools/consumer.py --fasta FASTA -o OUT zig-out/bin/mzdiff REFERENCE.mzML [CASE...]

@@ -24,10 +24,8 @@ jobs:
     runs-on: ubuntu-24.04
     timeout-minutes: 10
     permissions:
-      contents: write # push to the wiki repository
+      contents: write
     steps:
-      # main's current head, not the commit that started the run: a run that starts late, or a
-      # rerun of an old one, still publishes the newest wiki/ and never an older one.
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           ref: main

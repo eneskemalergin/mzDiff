@@ -1,15 +1,11 @@
 //! Severity of a difference, by the key it concerns: a PSI-MS accession, `user:NAME` for a
-//! userParam, `@NAME` for an attribute, or `array:ROLE` for a binary array.
+//! userParam, `@NAME` for an attribute, or `array:ACCESSION` for a binary array.
 //!
-//! - critical: the data itself or what it means (peaks, MS level, polarity, times, precursor m/z
-//!   and charge, activation method, spectrum type, instrument model).
-//! - major: values a search engine or a reader commonly uses (isolation offsets, energies, filter
-//!   string, injection time, scan window, summary values, FAIMS, source checksum).
-//! - minor: everything else, including unknown terms and user parameters.
-//! - ignored: bookkeeping that differs between tools by design (ids, offsets, counts, software,
-//!   file locations). Ignored keys are dropped when facts are collected.
-//!
-//! Exact keys come first, then ancestry in the bundled PSI-MS vocabulary, then the default.
+//! Critical is the data or what it means; major, values readers commonly use; minor, everything
+//! else; ignored, bookkeeping tools write differently by design, dropped when facts are collected.
+//! Overrides from `--set` win, then exact keys; any other array is major, and any other accession
+//! takes the severity of its ancestry in the bundled PSI-MS vocabulary, else minor. Ancestry
+//! answers are cached for at most `CACHE_LIMIT` accessions.
 
 const std = @import("std");
 const zmz = @import("zmz");
@@ -32,90 +28,47 @@ pub const Severity = enum {
 };
 
 const EXACT = std.StaticStringMap(Severity).initComptime(.{
-    // Spectrum identity and data.
-    // ms level
     .{ "MS:1000511", .critical },
-    // scan start time
     .{ "MS:1000016", .critical },
-    // isolation window target m/z
     .{ "MS:1000827", .critical },
-    // selected ion m/z
     .{ "MS:1000744", .critical },
-    // m/z (historical selected ion m/z)
     .{ "MS:1000040", .critical },
-    // charge state
     .{ "MS:1000041", .critical },
-    // m/z array
     .{ "array:MS:1000514", .critical },
-    // intensity array
     .{ "array:MS:1000515", .critical },
-    // time array
     .{ "array:MS:1000595", .critical },
 
-    // Values readers use.
-    // isolation window lower offset
     .{ "MS:1000828", .major },
-    // isolation window upper offset
     .{ "MS:1000829", .major },
-    // collision energy
     .{ "MS:1000045", .major },
-    // supplemental collision energy
     .{ "MS:1002680", .major },
-    // filter string
     .{ "MS:1000512", .major },
-    // ion injection time
     .{ "MS:1000927", .major },
-    // scan window lower limit
     .{ "MS:1000501", .major },
-    // scan window upper limit
     .{ "MS:1000500", .major },
-    // total ion current
     .{ "MS:1000285", .major },
-    // base peak m/z
     .{ "MS:1000504", .major },
-    // base peak intensity
     .{ "MS:1000505", .major },
-    // lowest observed m/z
     .{ "MS:1000528", .major },
-    // highest observed m/z
     .{ "MS:1000527", .major },
-    // FAIMS compensation voltage
     .{ "MS:1001581", .major },
-    // peak intensity (selected ion)
     .{ "MS:1000042", .major },
-    // SHA-1 of the source file
     .{ "MS:1000569", .major },
-    // instrument serial number
     .{ "MS:1000529", .major },
-    // calibration spectrum: a spectrum attribute, not a spectrum type, but a reader that loses it
-    // takes calibration scans for sample data
     .{ "MS:1000928", .major },
     .{ "@spectrumRef", .major },
-    // spectra paired out of their files' order
     .{ "order", .major },
-    // a spectrum's precursors in another order: the first is the one readers take
     .{ "precursorOrder", .major },
-    // the native id of spectra paired by scan number
     .{ "id", .major },
-    // the indexedmzML wrapper, present or not
     .{ "indexed", .major },
-    // the wrapper's tail: present, and pointing at the index
     .{ "indexListOffset", .major },
-    // a scan naming a configuration the header lacks
     .{ "instrumentConfiguration", .major },
 
-    // How B wrote the data, where A wrote it otherwise and readers stumble. Outside the standard
-    // is critical: a reader parsing the declared type fails. Inside it but beyond what known
-    // readers handle is major (Sage ignores groups and cannot decode numpress).
-    // an integer-typed value written as something else ("2.0")
     .{ "form:integer", .critical },
-    // a spectrum's or chromatogram's parameters taken through a group
     .{ "form:paramGroup", .major },
-    // an array in MS-Numpress
     .{ "form:numpress", .major },
     .{ "@startTimeStamp", .major },
 
-    // Bookkeeping that differs between tools by design.
     .{ "@id", .ignored },
     .{ "@index", .ignored },
     .{ "@count", .ignored },
@@ -132,47 +85,29 @@ const EXACT = std.StaticStringMap(Severity).initComptime(.{
     .{ "@defaultSourceFileRef", .ignored },
     .{ "@instrumentConfigurationRef", .ignored },
     .{ "@scanSettingsRef", .ignored },
-    // checked through the arrays
     .{ "@defaultArrayLength", .ignored },
     .{ "@arrayLength", .ignored },
     .{ "@encodedLength", .ignored },
     .{ "@nativeID", .ignored },
     .{ "@externalSpectrumID", .ignored },
-    // custom unreleased software tool
     .{ "MS:1000799", .ignored },
-    // conversion to mzML
     .{ "MS:1000544", .ignored },
-    // peak picking (a processing claim, not data)
     .{ "MS:1000035", .ignored },
-    // spectrum title
     .{ "MS:1000796", .ignored },
 });
 
-// Checked in order; the first ancestor that matches decides.
 const ANCESTORS = [_]struct { []const u8, Severity }{
-    // dissociation method
     .{ "MS:1000044", .critical },
-    // scan polarity
     .{ "MS:1000465", .critical },
-    // spectrum representation
     .{ "MS:1000525", .critical },
-    // spectrum type
     .{ "MS:1000559", .critical },
-    // instrument model
     .{ "MS:1000031", .critical },
-    // mass analyzer type
     .{ "MS:1000443", .major },
-    // ionization type
     .{ "MS:1000008", .major },
-    // detector type
     .{ "MS:1000026", .major },
-    // chromatogram type
     .{ "MS:1000626", .major },
-    // binary data type
     .{ "MS:1000518", .ignored },
-    // binary data compression type
     .{ "MS:1000572", .ignored },
-    // data file checksum type (other than SHA-1, kept above)
     .{ "MS:1000561", .ignored },
 };
 
@@ -183,7 +118,6 @@ const INTEGER_TYPES = [_][]const u8{
     "xsd:unsignedByte",
 };
 
-// The most accessions whose ancestry severity is remembered.
 const CACHE_LIMIT = 16384;
 
 pub const Rules = struct {
@@ -213,7 +147,6 @@ pub const Rules = struct {
         self.overrides.deinit(self.allocator);
     }
 
-    /// A copy with the same overrides and an empty cache, for use on another thread.
     pub fn clone(self: *const Rules) !Rules {
         var copy = Rules.init(self.allocator);
         errdefer copy.deinit();
@@ -222,7 +155,6 @@ pub const Rules = struct {
         return copy;
     }
 
-    /// Sets a key's severity from the command line; it wins over every built-in rule.
     pub fn override(self: *Rules, key: []const u8, level: Severity) !void {
         const owned = try self.allocator.dupe(u8, key);
         errdefer self.allocator.free(owned);
@@ -231,7 +163,6 @@ pub const Rules = struct {
         entry.value_ptr.* = level;
     }
 
-    /// The severity `--set` gave `key`, which wins over any a check chooses itself.
     pub fn overridden(self: *const Rules, key: []const u8) ?Severity {
         return self.overrides.get(key);
     }
@@ -243,20 +174,16 @@ pub const Rules = struct {
         if (!std.mem.startsWith(u8, key, "MS:")) return .minor;
         if (self.cache.get(key)) |found| return found;
         const found = self.byAncestry(key);
-        // A file with endless distinct accessions must not grow the cache without bound.
         if (self.cache.count() >= CACHE_LIMIT) return found;
         const owned = self.allocator.dupe(u8, key) catch return found;
         self.cache.put(self.allocator, owned, found) catch self.allocator.free(owned);
         return found;
     }
 
-    /// Whether every value type the bundled vocabulary gives `key` is an XSD integer type
-    /// (`charge state`, `ms level`), so a value spelled otherwise is outside the standard.
     pub fn integerTyped(self: *Rules, key: []const u8) bool {
         if (!std.mem.startsWith(u8, key, "MS:")) return false;
         if (self.integers.get(key)) |found| return found;
         const found = self.byValueType(key);
-        // Bounded like the severity cache.
         if (self.integers.count() >= CACHE_LIMIT) return found;
         const owned = self.allocator.dupe(u8, key) catch return found;
         self.integers.put(self.allocator, owned, found) catch self.allocator.free(owned);
@@ -277,8 +204,6 @@ pub const Rules = struct {
         return true;
     }
 
-    /// The ancestor whose rule decides the severity of `key` (mass analyzer type, scan polarity, ...),
-    /// or null when no rule above the default applies.
     pub fn category(self: *const Rules, key: []const u8) ?[]const u8 {
         if (!std.mem.startsWith(u8, key, "MS:")) return null;
         const vocabulary = self.vocabulary orelse return null;
@@ -289,7 +214,6 @@ pub const Rules = struct {
         return null;
     }
 
-    /// The term's name in the bundled vocabulary, or null for unknown accessions.
     pub fn name(self: *const Rules, key: []const u8) ?[]const u8 {
         const accession = if (std.mem.startsWith(u8, key, "array:")) key["array:".len..] else key;
         const vocabulary = self.vocabulary orelse return null;
@@ -297,7 +221,6 @@ pub const Rules = struct {
         return match.term.name();
     }
 
-    /// Whether `accession` is `parent` or one of its descendants in the bundled vocabulary.
     pub fn isA(self: *const Rules, accession: []const u8, parent: []const u8) bool {
         const vocabulary = self.vocabulary orelse return false;
         return vocabulary.isA(accession, parent) catch false;
@@ -322,7 +245,6 @@ test "[unit] - [severity]: exact keys win over ancestry and the default" {
     try std.testing.expectEqual(Severity.ignored, rules.severity("@index"));
     try std.testing.expectEqual(Severity.minor, rules.severity("user:Something"));
     try std.testing.expectEqual(Severity.major, rules.severity("array:MS:1000617"));
-    // calibration spectrum, under spectrum attribute (minor by ancestry)
     try std.testing.expectEqual(Severity.major, rules.severity("MS:1000928"));
 }
 
@@ -330,15 +252,10 @@ test "[unit] - [severity]: ancestry classifies activation methods, polarity, and
     var rules = Rules.init(std.testing.allocator);
     defer rules.deinit();
     try std.testing.expect(rules.vocabulary != null);
-    // beam-type CID
     try std.testing.expectEqual(Severity.critical, rules.severity("MS:1000422"));
-    // ETD
     try std.testing.expectEqual(Severity.critical, rules.severity("MS:1000598"));
-    // positive scan
     try std.testing.expectEqual(Severity.critical, rules.severity("MS:1000130"));
-    // Orbitrap Fusion
     try std.testing.expectEqual(Severity.critical, rules.severity("MS:1002416"));
-    // zlib
     try std.testing.expectEqual(Severity.ignored, rules.severity("MS:1000574"));
 }
 
@@ -357,6 +274,5 @@ test "[unit] - [types]: charge and ms level are integer typed, times and m/z are
     try std.testing.expect(!rules.integerTyped("MS:1000016"));
     try std.testing.expect(!rules.integerTyped("MS:1000744"));
     try std.testing.expect(!rules.integerTyped("user:charge"));
-    // Answered again from the cache.
     try std.testing.expect(rules.integerTyped("MS:1000041"));
 }

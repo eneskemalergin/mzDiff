@@ -1,12 +1,9 @@
-//! Renders a comparison for people and for programs: the report (difference classes with
-//! examples), the summary (the verdict and its counts), the list (every difference, streamed as it
-//! is found), each as text, TSV, or JSON, and the view (a git-style diff of the differing records,
-//! unified or side by side, for people only).
+//! Renders a comparison as the report, the summary, the list, or the view, in text, TSV, or JSON.
 //!
 //! What is shown never changes the verdict: `Selection` narrows the report's classes and the
-//! list's lines, while `Outcome` (status, completion, totals) always describes the whole
-//! comparison. JSON is schema 1: the report and the summary are one document each, the list is
-//! JSON Lines ending with a summary line. Text may carry ANSI color; TSV and JSON never do.
+//! list's lines, while `Outcome` always describes the whole comparison. JSON is schema 1: the
+//! report and the summary are one document each, the list is JSON Lines ending with a summary
+//! line. Text may carry ANSI color; TSV and JSON never do.
 //!
 //! `Tally`, `describe`, `isTolerance`, `writeShortPath`, and `writeLargest` are public for the HTML
 //! view in `html.zig` only.
@@ -24,10 +21,8 @@ pub const Mode = enum { report, summary, list, view, quiet };
 
 pub const Format = enum { text, tsv, json, html };
 
-/// `same`: no difference at all; `tolerated`: none at or above `--fail-on`; `differs`: some.
 pub const Status = enum { same, tolerated, differs };
 
-/// `incomplete` when `--max-spectra` stopped the comparison before the end of either file.
 pub const Completion = enum { complete, incomplete };
 
 pub const Side = struct {
@@ -37,7 +32,6 @@ pub const Side = struct {
     chromatograms: usize,
 };
 
-/// The whole comparison, whatever is selected for display.
 pub const Outcome = struct {
     a: Side,
     b: Side,
@@ -46,13 +40,10 @@ pub const Outcome = struct {
     completion: Completion,
     status: Status,
     fail_on: Severity,
-    /// Difference classes per severity: critical, major, minor.
     totals: [3]usize,
-    /// Wall time, shown only to an interactive reader.
     seconds: ?f64,
 };
 
-/// What to show; never the verdict.
 pub const Selection = struct {
     severity: Severity = .minor,
     keys: []const []const u8 = &.{},
@@ -93,7 +84,6 @@ pub const Style = struct {
     }
 };
 
-/// The status word: from the classes found and `--fail-on`, never from the selection.
 pub fn statusOf(classes: []const *Class, fail_on: Severity) Status {
     if (classes.len == 0) return .same;
     for (classes) |class| if (@intFromEnum(class.severity) <= @intFromEnum(fail_on)) return .differs;
@@ -210,7 +200,6 @@ pub fn writeSummary(out: *std.Io.Writer, format: Format, style: Style, outcome: 
     }
 }
 
-/// Streams every difference as it is found, in the chosen format. Holds nothing per difference.
 pub const Lister = struct {
     out: *std.Io.Writer,
     format: Format,
@@ -314,7 +303,6 @@ pub const Lister = struct {
         try out.writeByte('\n');
     }
 
-    /// Ends the list: the summary line or object, and how many lines `--limit` held back.
     pub fn finish(self: *Lister, outcome: Outcome) !void {
         switch (self.format) {
             .text, .html => {
@@ -334,17 +322,12 @@ pub const Lister = struct {
 
 pub const Layout = enum { unified, side_by_side };
 
-// The most distinct keys a view counts for its refusal's suggestions.
 const MAX_KEYS = 4096;
 
-/// What a view counts while it renders: the records shown, each record's most severe difference,
-/// the keys by how many records they differ in, and whether the view grew too large to show.
 pub const Tally = struct {
     allocator: std.mem.Allocator,
-    /// Records the view shows at most.
     records: usize,
     shown: usize = 0,
-    /// Differing records by their most severe shown difference: critical, major, minor.
     differing: [3]usize = .{ 0, 0, 0 },
     worst: ?Severity = null,
     too_large: bool = false,
@@ -363,7 +346,6 @@ pub const Tally = struct {
         self.last_record.deinit(self.allocator);
     }
 
-    /// Counts one shown difference; returns whether it opens a new record.
     pub fn note(self: *Tally, difference: Difference) !bool {
         const opens = !std.mem.eql(u8, self.last_record.items, difference.record);
         if (opens) {
@@ -385,7 +367,6 @@ pub const Tally = struct {
             found.records += 1;
             return;
         }
-        // Enough keys to suggest the frequent ones; beyond, new keys go uncounted.
         if (self.keys.count() >= MAX_KEYS) return;
         const key = try self.allocator.dupe(u8, difference.key);
         errdefer self.allocator.free(key);
@@ -403,7 +384,6 @@ pub const Tally = struct {
         return self.differing[0] + self.differing[1] + self.differing[2];
     }
 
-    /// The keys that differ in the most records, most first.
     fn topKeys(self: *const Tally) [3]?TopKey {
         var top: [3]?TopKey = .{ null, null, null };
         var it = self.keys.iterator();
@@ -423,8 +403,6 @@ pub const Tally = struct {
 
     const TopKey = struct { key: []const u8, name: []const u8, records: usize };
 
-    // How large the view would have been and what to narrow it by: a severity that would cut the
-    // count under the cap, and the keys that hit the most records.
     pub fn writeRefusal(self: *const Tally, out: *std.Io.Writer) !void {
         try out.print("mzdiff: too large to view: {d} records differ (critical {d}, major {d}, minor {d});" ++
             " the view shows at most {d}.\n", .{ self.total(), self.differing[0], self.differing[1], self.differing[2], self.records });
@@ -442,10 +420,6 @@ pub const Tally = struct {
     }
 };
 
-/// Renders the differing records as a git-style diff: a header per record, the element path, then
-/// `-` for A and `+` for B (`~` when the difference is within a tolerance), or two columns side by
-/// side. The text is built in a bounded buffer while the comparison runs; when more than `records`
-/// records differ or the text passes `bytes`, `finish` refuses to show it and says how to narrow it.
 pub const Viewer = struct {
     out: *std.Io.Writer,
     style: Style,
@@ -488,7 +462,6 @@ pub const Viewer = struct {
         }
         if (self.tally.too_large) return;
         const w = &self.buffer.writer;
-        // Arrays sit under their own heading, apart from the record's parameters.
         const arrays = std.mem.startsWith(u8, difference.key, "array:");
         const path_matches = std.mem.startsWith(u8, self.last_path.items, difference.path) and
             std.mem.eql(u8, self.last_path.items[difference.path.len..], if (arrays) "/binaryDataArray" else "");
@@ -509,7 +482,6 @@ pub const Viewer = struct {
         if (self.buffer.written().len > self.bytes) self.drop();
     }
 
-    // Too much to show: keep counting, stop rendering.
     fn drop(self: *Viewer) void {
         self.tally.too_large = true;
         self.buffer.clearRetainingCapacity();
@@ -538,7 +510,6 @@ pub const Viewer = struct {
         const tolerated = isTolerance(difference.kind);
         var label_buffer: [160]u8 = undefined;
         const label = describe(&label_buffer, difference);
-        // The first line of the pair carries the tag.
         var tagged = false;
         if (difference.a.len != 0 or difference.kind == .missing or difference.kind == .record_missing) {
             const width = try self.line(w, if (tolerated) '~' else '-', .a, label, difference.a);
@@ -567,7 +538,6 @@ pub const Viewer = struct {
 
     const Which = enum { a, b };
 
-    // One side of a difference; returns its width, so a tag after it can line up in one column.
     fn line(self: *Viewer, w: *std.Io.Writer, marker: u8, side: Which, label: []const u8, value: []const u8) !usize {
         const color = if (marker == '~') "\x1b[33m" else if (side == .a) "\x1b[31m" else "\x1b[32m";
         if (self.style.color) try w.writeAll(color);
@@ -618,7 +588,6 @@ pub const Viewer = struct {
         }
     }
 
-    // Each value column's width: what the terminal leaves after the name and the tag.
     fn columnWidth(self: *const Viewer) usize {
         const fixed = 2 + 40 + 1 + 3 + 32;
         return @max(16, (self.width -| fixed) / 2);
@@ -628,7 +597,6 @@ pub const Viewer = struct {
         if (self.style.color) try w.writeAll(if (on) "\x1b[2m" else "\x1b[0m");
     }
 
-    /// Prints the view, or, when it is too large, how large and how to narrow it; then the summary.
     pub fn finish(self: *Viewer, outcome: Outcome) !void {
         self.tally.close();
         if (self.tally.too_large) {
@@ -645,8 +613,6 @@ pub fn writeLargest(w: *std.Io.Writer, array: compare.ArrayDetail) !void {
     try w.print("; largest at [{d}]: {d} against {d}", .{ array.largest, array.largest_a, array.largest_b });
 }
 
-// One side's column: its value, "(present)" for a term with no value that only this side has, or
-// "-" for nothing.
 fn sideValue(difference: Difference, side: Viewer.Which) []const u8 {
     const value = if (side == .a) difference.a else difference.b;
     if (value.len != 0) return value;
@@ -661,8 +627,6 @@ pub fn isTolerance(kind: compare.Kind) bool {
     };
 }
 
-// The left-hand name of a difference: what it is, and what about it differs when that is not its
-// value ("base peak m/z (unit)").
 pub fn describe(buffer: []u8, difference: Difference) []const u8 {
     const name = if (difference.name.len != 0) difference.name else difference.key;
     const aspect: ?[]const u8 = switch (difference.kind) {
@@ -681,9 +645,7 @@ pub fn describe(buffer: []u8, difference: Difference) []const u8 {
     return if (aspect) |what| std.fmt.bufPrint(buffer, "{s} ({s})", .{ name, what }) catch name else name;
 }
 
-// `text` cut or padded to exactly `width` bytes, so the columns line up (cut at a UTF-8 boundary).
 fn writePadded(out: *std.Io.Writer, untrusted: []const u8, width: usize) !void {
-    // Made safe first, so the padding counts what the terminal shows.
     var safe_buffer: [1024]u8 = undefined;
     var fixed = std.Io.Writer.fixed(&safe_buffer);
     writeSafe(&fixed, untrusted, false) catch {};
@@ -726,7 +688,6 @@ fn writeHeadText(out: *std.Io.Writer, style: Style, outcome: Outcome) !void {
     }
 }
 
-// "complete: differs | classes: critical 1, major 4, minor 4 | spectra: A 2103, B 2103, paired 2103 | ..."
 fn writeSummaryLine(out: *std.Io.Writer, style: Style, outcome: Outcome) !void {
     try out.print("{s}: ", .{@tagName(outcome.completion)});
     try style.status(out, outcome.status);
@@ -740,19 +701,13 @@ fn writeSummaryLine(out: *std.Io.Writer, style: Style, outcome: Outcome) !void {
 
 pub const VERSION = @import("build_options").mzdiff_version;
 
-/// Why a run could not complete, for stderr and for JSON. `side` and `path` are null when the
-/// failure is not one file's (out of memory, a closed output).
 pub const Failure = struct {
     side: ?enum { a, b } = null,
     path: ?[]const u8 = null,
-    /// The error's name, stable for scripts (FileNotFound, InvalidXml, ...).
     name: []const u8 = "",
-    /// A sentence for people: the reader's diagnostic when it gave one.
     message: []const u8 = "",
 };
 
-/// The error object a JSON run prints when it cannot complete: the whole document for the report
-/// and the summary, the last line for --list.
 pub fn writeErrorJson(out: *std.Io.Writer, failure: Failure) !void {
     try out.writeAll("{\"type\": \"error\", \"schema_version\": 1, ");
     try out.print("\"tool\": {{\"name\": \"mzdiff\", \"version\": \"{s}\"}}, \"error\": ", .{VERSION});
@@ -766,8 +721,6 @@ pub fn writeErrorJson(out: *std.Io.Writer, failure: Failure) !void {
     try out.writeAll("}\n");
 }
 
-// The outcome's fields, without the enclosing braces, each line starting with `indent` (an empty
-// indent writes one line).
 fn writeOutcomeJson(out: *std.Io.Writer, outcome: Outcome, indent: []const u8) !void {
     const sep = if (indent.len == 0) ", " else ",\n";
     try out.print("{s}\"schema_version\": 1{s}", .{ indent, sep });
@@ -801,7 +754,6 @@ fn orNone(text: []const u8) []const u8 {
     return if (text.len == 0) "-" else text;
 }
 
-// Drops the list levels, which add length but no meaning: spectrum/scanList/scan -> spectrum/scan.
 pub fn writeShortPath(out: *std.Io.Writer, path: []const u8) !void {
     var parts = std.mem.splitScalar(u8, path, '/');
     var first = true;
@@ -813,10 +765,6 @@ pub fn writeShortPath(out: *std.Io.Writer, path: []const u8) !void {
     }
 }
 
-/// How many bytes of a character that must not reach a terminal or a page as it is start at
-/// `text[i]`, or 0: C0 controls and DEL (an escape sequence can rewrite a terminal), C1 controls
-/// (UTF-8 C2 80 to C2 9F), and the bidirectional embeddings, overrides, and isolates (U+202A to
-/// U+202E, U+2066 to U+2069), which can make text display in another order than it reads.
 pub fn unsafeLength(text: []const u8, i: usize) usize {
     const c = text[i];
     if (c < 0x20 or c == 0x7f) return 1;
@@ -830,8 +778,6 @@ pub fn unsafeLength(text: []const u8, i: usize) usize {
     return 0;
 }
 
-/// Writes an unsafe character (one `unsafeLength` found) as visible text: `\t`, `\n`, `\r`,
-/// `\x1b`, or `\u{202e}`.
 pub fn writeUnsafe(out: *std.Io.Writer, bytes: []const u8) !void {
     switch (bytes.len) {
         1 => switch (bytes[0]) {
@@ -847,16 +793,12 @@ pub fn writeUnsafe(out: *std.Io.Writer, bytes: []const u8) !void {
     }
 }
 
-// Writes untrusted text with its unsafe characters made visible; in a TSV cell, a backslash is
-// doubled too, so the cell reads back unambiguously.
 fn writeSafe(out: *std.Io.Writer, text: []const u8, tsv: bool) !void {
     var start: usize = 0;
     var i: usize = 0;
     while (i < text.len) {
-        // Printable ASCII is by far the most of it, and never unsafe: skip it 16 bytes at a time.
         if (i + 16 <= text.len) {
             const chunk: @Vector(16, u8) = text[i..][0..16].*;
-            // 0x20 to 0x7e land below 0x5f once 0x20 is taken away; everything else wraps above it.
             const outside = chunk -% @as(@Vector(16, u8), @splat(0x20)) >= @as(@Vector(16, u8), @splat(0x5f));
             const slash = chunk == @as(@Vector(16, u8), @splat('\\'));
             const any = @reduce(.Or, outside) or (tsv and @reduce(.Or, slash));
@@ -888,7 +830,6 @@ fn writeSafe(out: *std.Io.Writer, text: []const u8, tsv: bool) !void {
     try out.writeAll(text[start..]);
 }
 
-/// Untrusted text for a terminal, written with `{f}`: its unsafe characters made visible.
 pub const Safe = struct {
     text: []const u8,
 
@@ -901,8 +842,6 @@ pub fn safe(text: []const u8) Safe {
     return .{ .text = text };
 }
 
-// A TSV field with tabs, line breaks, backslashes, and other unsafe characters escaped, so each
-// row stays one line and reads back unambiguously.
 fn writeTsvField(out: *std.Io.Writer, text: []const u8) !void {
     try writeSafe(out, text, true);
 }
@@ -921,7 +860,6 @@ fn writeJsonString(out: *std.Io.Writer, text: []const u8) !void {
     try out.writeByte('"');
 }
 
-// JSON has no NaN or infinity; those become strings.
 fn writeJsonNumber(out: *std.Io.Writer, value: f64) !void {
     if (std.math.isFinite(value)) return out.print("{d}", .{value});
     try writeJsonString(out, if (std.math.isNan(value)) "NaN" else if (value > 0) "Infinity" else "-Infinity");

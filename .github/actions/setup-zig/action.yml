@@ -1,11 +1,9 @@
 name: Set up Zig
-description: Install the pinned Zig release, verified against its SHA-256 from ziglang.org/download/index.json, and cache it.
+description: Install the pinned Zig release, verified on download against its SHA-256 from ziglang.org/download/index.json, from the cache when a run on this repository saved it.
 
 runs:
   using: composite
   steps:
-    # A runner downloads Zig only when no cached copy exists; the checksum is checked on download,
-    # and only runs on this repository's branches write the cache.
     - name: Restore Zig 0.16.0
       uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
       with:
@@ -13,7 +11,6 @@ runs:
         key: zig-0.16.0-${{ runner.os }}-${{ runner.arch }}
     - name: Install Zig 0.16.0
       shell: bash
-      # The PATH entry is built from RUNNER_TEMP and constants only; nothing outside can steer it.
       run: | # zizmor: ignore[github-env]
         set -euo pipefail
         version=0.16.0
@@ -27,8 +24,6 @@ runs:
         if [ ! -x "${home}/${name}/zig" ]; then
           mkdir -p "${home}"
           tarball="${RUNNER_TEMP}/${name}.tar.xz"
-          # Community mirrors first, in random order, as ziglang.org asks of CI; ziglang.org itself
-          # is the last resort. The pinned checksum decides, so any source is safe.
           mirrors="$(curl -fsS --max-time 10 https://ziglang.org/download/community-mirrors.txt || true)"
           sources="$(printf '%s\n' "${mirrors}" | awk 'NF' | { shuf 2>/dev/null || cat; })"
           while read -r base; do

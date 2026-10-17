@@ -1,26 +1,12 @@
 #!/usr/bin/env bash
-# Converts corpus .raw files with one tool and compares each output with the TRFP reference
-# mzML beside the .raw, using mzdiff; also runs mzValidate on each output.
+# Converts Thermo .raw files with one tool, compares each output with the ThermoRawFileParser
+# mzML beside the .raw using mzdiff, and runs mzValidate on each output.
 #
-# usage: tools/corpus.sh [-t TOOL] [-o OUT] [-c DIR] [-b BASELINE] [RAW...]
-#   -t TOOL      mzbridge (default), opentfraw, or mzdata
-#   -o OUT       directory for the results (default: a new /var/tmp directory)
-#   -c DIR       corpus root searched when no RAW is given (default: $MZDIFF_CORPUS)
-#   -b BASELINE  an earlier run's OUT to compare with: writes changes.tsv and exits 1 when a
-#                critical or major class is new or hits more records than before
-#   RAW...       files to check; default every .raw with a .mzML reference beside it
+# usage: tools/corpus.sh [-t mzbridge|opentfraw|mzdata] [-o OUT] [-c DIR] [-b BASELINE] [RAW...]
 #
-# MZBRIDGE names the mzBridge checkout (default: ../mzBridge beside this repository); its zig-out holds
-# mzBridge and its tools/bin the peers and mzValidate.
-#
-# One file at a time, so a run does not compete with itself for memory or disk. Converted output
-# goes to a scratch directory under /var/tmp and is removed after each comparison. mzdiff (and
-# mzBridge, for -t mzbridge) are rebuilt first, so a run never uses a stale binary.
-#
-# status in summary.tsv: mzdiff's status word (same, tolerated, differs), "+invalid" when
-# mzValidate found errors, "nothing paired" when A held spectra and none paired, "(incomplete)"
-# when the comparison stopped early, "convert failed: ...", or "mzdiff failed: ..." (an unreadable
-# file; the first line of mzdiff's message follows). The paired column counts paired spectra.
+# Needs an mzBridge checkout (MZBRIDGE, default ../mzBridge) with its peers and mzValidate built.
+# Writes summary.tsv, classes.tsv, run.txt, and files/ to OUT; with -b, also changes.tsv, and
+# exits 1 when a critical or major class is new or grown. The Development wiki page has details.
 set -euo pipefail
 
 root=$(cd "$(dirname "$0")/.." && pwd)
@@ -62,7 +48,6 @@ fi
 if [ -z "$out" ]; then out=$(mktemp -d /var/tmp/mzdiff-corpus.XXXXXX); fi
 mkdir -p "$out/files"
 scratch=$(mktemp -d /var/tmp/mzdiff-scratch.XXXXXX)
-# Removes only what this script puts in its scratch directory, even when it stops early.
 cleanup() {
   rm -f "$scratch/out.mzML" "$scratch/err" "$scratch"/mzdata/*.mzML
   rmdir "$scratch/mzdata" 2> /dev/null || true
@@ -70,13 +55,11 @@ cleanup() {
 }
 trap cleanup EXIT
 
-convert() { # raw output.mzML
+convert() {
   case $tool in
     mzbridge) "$repo/zig-out/bin/mzBridge" convert "$1" "$2" ;;
     opentfraw) "$repo/tools/bin/to_mzml" --indexed "$1" "$2" > /dev/null ;;
     mzdata)
-      # Chained: under `if ! convert`, set -e is off, and a converter that fails after writing a
-      # partial file must still fail the conversion.
       "$repo/tools/bin/mzdata-converter" -o "$scratch/mzdata" "$1" > /dev/null &&
         mv "$scratch/mzdata/$(basename "${1%.*}").mzML" "$2" &&
         rmdir "$scratch/mzdata" ;;
@@ -94,7 +77,7 @@ else
   files=("$@")
 fi
 
-revision() { # dir: its commit, marked when the work tree differs from it
+revision() {
   if git -C "$1" rev-parse --short HEAD 2> /dev/null; then
     git -C "$1" diff --quiet HEAD 2> /dev/null || echo "(modified)"
   else
@@ -102,7 +85,6 @@ revision() { # dir: its commit, marked when the work tree differs from it
   fi | paste -sd' '
 }
 
-# What produced these results, for comparing runs later.
 {
   echo "tool: $tool"
   echo "date: $(date -Iseconds)"
@@ -113,9 +95,7 @@ revision() { # dir: its commit, marked when the work tree differs from it
 
 summary="$out/summary.tsv"
 printf 'file\tstatus\tcritical\tmajor\tminor\tpaired\tseconds\tvalidate\n' > "$summary"
-# One summary row from mzdiff's JSON report: its status word (or "nothing paired" when A held
-# spectra and none paired), class counts, and paired spectra.
-row() { # name status-override seconds validate report.json
+row() {
   python3 - "$@" << 'PYTHON'
 import json, sys
 name, override, seconds, check, path = sys.argv[1:]
@@ -141,7 +121,6 @@ for raw in "${files[@]}"; do
   fi
   start=$(date +%s.%N)
   if ! convert "$raw" "$mzml" 2> "$scratch/err"; then
-    # The reason, not the banner: skip progress lines and a panic's location line.
     reason=$(grep -v -e 'panicked at' -e '^Found [0-9]* file' -e '^note: run with' -e '^[[:space:]]*$' "$scratch/err" | head -1 || true)
     [ -n "$reason" ] || reason=$(tr '\n\t' '  ' < "$scratch/err")
     printf '%s\tconvert failed: %s\t\t\t\t\t\t\n' "$name" "$(printf '%s' "$reason" | tr '\t' ' ' | cut -c1-160)" >> "$summary"
@@ -171,8 +150,6 @@ for raw in "${files[@]}"; do
   rm -f "$mzml" "$scratch/err"
 done
 
-# Classes across the run: how many files each (severity, kind, path, key) hit, and in how many
-# records in total.
 python3 - "$out" << 'PYTHON' | sort -t$'\t' -k3,3 -k1,1nr > "$out/classes.tsv"
 import glob, json, os, sys
 files, records = {}, {}
@@ -188,8 +165,6 @@ awk -F'\t' 'NR > 1 { split($2, s, ":"); n[s[1]]++ } END { for (k in n) printf " 
 echo "results: $out (summary.tsv, classes.tsv, run.txt, files/ with one JSON report per file)"
 [ -n "$baseline" ] || exit 0
 
-# Against the baseline: per file, the status change and every class that is new, gone, or hits
-# more or fewer records; a new or grown critical or major class is a regression.
 python3 - "$baseline" "$out" << 'PYTHON'
 import glob, json, os, sys
 before_dir, after_dir = sys.argv[1:]
@@ -214,7 +189,7 @@ for name in sorted(set(status_before) | set(status_after)):
         rows.append([name, "status", "", "", "", "", s0, s1])
     c0, c1 = classes_before.get(name, {}), classes_after.get(name, {})
     if name not in classes_before or name not in classes_after:
-        continue  # not compared on one side: the status row says why
+        continue
     for key in sorted(set(c0) | set(c1)):
         r0, r1 = c0.get(key, 0), c1.get(key, 0)
         if r0 == r1:

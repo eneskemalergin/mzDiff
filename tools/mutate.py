@@ -3,14 +3,9 @@
 
 usage: tools/mutate.py MZDIFF REFERENCE.mzML [CASE...]
 
-Each case names the key of the critical or major class it must raise (`KEY (KIND)` when the kind
-matters too), `exit 3` when the file must fail to read, `minor:KIND` when it must raise that minor
-kind and nothing more serious (a tolerance at work), or nothing when B must compare exactly the
-same (a non-defect, or a defect mzValidate owns).
-An edit that shifts bytes also breaks the index offset; that `indexListOffset` class is ignored
-unless the case is about the trailer. A case whose structure the reference lacks is skipped.
-The PRM fixture (PXD006618/1fmol_HSP90_SILpepmix_PRM.mzML) has every single-precursor structure;
-an MS3 reference with two precursors per spectrum (PXD070648) has the multi-precursor ones.
+Each case names the class it must raise, `exit 3`, `minor:KIND`, or nothing for the same result;
+a case whose structure the reference lacks is skipped. The Development wiki page lists the
+notation and the references that cover every case.
 
 Exit status: 0 when every case that ran behaved as expected, 1 otherwise.
 """
@@ -20,7 +15,7 @@ import consumer
 
 
 class Skip(Exception):
-    """The reference has no structure for this case."""
+    pass
 
 
 MZDIFF = sys.argv[1]
@@ -52,7 +47,6 @@ def drop_spectrum(t):
     return t[:a0] + t[a1:]
 
 def drop_many(t):
-    # More consecutive spectra than the pairing window holds (1,024), so they leave as missing.
     a0, _ = spectrum_block(t, 100)
     _, b1 = spectrum_block(t, 1699)
     return t[:a0] + t[b1:]
@@ -104,17 +98,14 @@ def sst_coarse(t):
     if not m:
         raise Skip("scan 2000 has no scan start time")
     v = float(m.group(1))
-    # One decimal, and more than any rounding of the original can explain (0.15 to 0.25 off).
     new = f"{round(v, 1) + 0.2:.1f}"
     blk = blk[:m.start(1)] + new + blk[m.end(1):]
     return t[:a0] + blk + t[a1:]
 
 def ic_ref(t):
-    # A configuration the header does not have.
     return first_in_spectrum(t, 5, 'instrumentConfigurationRef="IC1"', 'instrumentConfigurationRef="IC99"')
 
 def ic_other(t):
-    # Another configuration the header has: the scan's analyzer changes.
     if 'instrumentConfiguration id="IC2"' not in t:
         raise Skip("the reference has one instrument configuration")
     return first_in_spectrum(t, 5, 'instrumentConfigurationRef="IC1"', 'instrumentConfigurationRef="IC2"')
@@ -199,8 +190,6 @@ def array_in(t, scan, accession):
     raise Skip(f"scan {scan} has no {accession} array")
 
 def with_array(t, scan, accession, change, bits=None, compressed=None):
-    """Decodes one array, applies `change` to its values, and encodes it again, optionally at
-    other precision or compression."""
     start, end, xml = array_in(t, scan, accession)
     old_bits = 64 if "MS:1000523" in xml else 32 if "MS:1000521" in xml else None
     if old_bits is None:
@@ -236,11 +225,9 @@ def param_value(t, scan, accession, change):
     return t[:a0] + blk[:m.start(1)] + change(m.group(1)) + blk[m.end(1):] + t[a1:]
 
 def tic_zero(t):
-    # Readers take a zero total ion current for an empty spectrum; Sage drops the spectrum.
     return param_value(t, 5, "MS:1000285", lambda v: "0")
 
 def ms_level_in_group(t):
-    # The same parameters through a group: the values match, but some readers (Sage) ignore groups.
     m = re.search(r'<referenceableParamGroupList count="(\d+)">\n', t)
     if not m:
         raise Skip("the reference has no parameter group list")
@@ -256,7 +243,6 @@ def ms_level_in_group(t):
     blk = blk[:line.start()] + '          <referenceableParamGroupRef ref="mutateMsLevel" />\n' + blk[line.end():]
     return t[:a0] + blk + t[a1:]
 
-# One term in place of another of the same kind: one difference, not a missing and an extra.
 
 def analyzer_swapped(t):
     old = '<cvParam cvRef="MS" accession="MS:1000484" value="" name="orbitrap" />'
@@ -276,12 +262,9 @@ def activation_swapped(t):
     return first_in_spectrum(t, 5, HCD, 'accession="MS:1000598" value="" name="electron transfer dissociation"')
 
 def activation_narrowed(t):
-    # Supplemental beam-type CID is a kind of beam-type CID: more specific, not other.
     single_precursor(t, 5)
     return first_in_spectrum(t, 5, HCD, 'accession="MS:1002678" value="" name="supplemental beam-type collision-induced dissociation"')
 
-# Form: the same data written so some readers fail. mzdiff must report it itself, not leave it
-# to mzValidate.
 
 def in_spectrum(t, scan, edit, what):
     a0, a1 = spectrum_block(t, scan)
@@ -296,7 +279,6 @@ def charge_spelled(t):
 def mz_numpress(t):
     return in_spectrum(t, 5, consumer.numpress_mz, "m/z array")
 
-# Meaning-preserving edits: mzdiff must report nothing above minor.
 
 def same_param_order(t):
     a0, a1 = spectrum_block(t, 5)
@@ -342,7 +324,6 @@ def same_float32(t):
 def same_peak_order(t):
     return with_array(with_array(t, 5, "MS:1000514", lambda v: v[::-1]), 5, "MS:1000515", lambda v: v[::-1])
 
-# Tolerance boundaries: just inside must stay minor, just outside must be reported.
 
 def mz_param_inside(t):
     return param_value(t, 5, "MS:1000504", lambda v: repr(float(v) * (1 + 0.9e-6)))
@@ -376,7 +357,6 @@ def empty_spectra(t):
 
 UNREADABLE = "exit 3"
 
-# Case name, edit, and what mzdiff must report: a class key, UNREADABLE (the comparison cannot complete), or None for the same.
 CASES = [
     ("swap_spectra", swap_spectra, "order"),
     ("dup_spectrum", dup_spectrum, "@id"),
@@ -401,7 +381,6 @@ CASES = [
     ("swap_precursor_charge", swap_precursor_charge, "MS:1000041"),
     ("swap_precursor_energy", swap_precursor_energy, "MS:1000045"),
     ("reorder_precursors", reorder_precursors, "precursorOrder"),
-    # Meaning-preserving edits.
     ("same_param_order", same_param_order, None),
     ("same_attribute_order", same_attribute_order, None),
     ("same_number_spelling", same_number_spelling, None),
@@ -416,7 +395,6 @@ CASES = [
     ("same_uncompressed", same_uncompressed, None),
     ("same_float32", same_float32, "minor:precision"),
     ("peaks_reversed", same_peak_order, "array:peaks"),
-    # Each tolerance, just inside (minor) and just outside (reported).
     ("mz_param_inside", mz_param_inside, "minor:ppm"),
     ("mz_param_outside", mz_param_outside, "MS:1000504"),
     ("mz_array_inside", mz_array_inside, "minor:ppm"),
@@ -425,19 +403,15 @@ CASES = [
     ("intensity_outside", intensity_outside, "array:MS:1000515"),
     ("rounding_inside", rounding_inside, "minor:rounding"),
     ("rounding_outside", rounding_outside, "MS:1000016"),
-    # mzValidate checks these (a unit the term does not allow, the index, the checksum); mzdiff
-    # files the unit as minor and stays quiet about the rest.
     ("unit_only_b", unit_only_b, "minor:unit"),
     ("bad_index_offset", bad_index_offset, None),
     ("bad_checksum", bad_checksum, None),
     ("index_attr", index_attr, None),
-    # Not defects: XML turns a tab in an attribute into a space, and values are trimmed.
     ("text_tab", text_tab, None),
     ("serial_space", serial_leading_zero, None),
 ]
 
 failed = 0
-# The scratch file goes whatever happens to a case.
 try:
     for name, edit, expect in CASES:
         if ONLY and name not in ONLY:

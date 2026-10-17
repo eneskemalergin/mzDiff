@@ -37,7 +37,6 @@ jobs:
           key: zig-pkg-${{ hashFiles('build.zig.zon') }}
       - name: Format
         run: zig fmt --check build.zig src
-      # The tools need real mzML and external programs to run; this checks that they parse.
       - name: Tool syntax
         run: |
           python3 -m py_compile tools/consumer.py tools/mutate.py

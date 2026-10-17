@@ -18,9 +18,6 @@ const rules_mod = @import("rules.zig");
 const Fact = compare.Fact;
 const Rules = rules_mod.Rules;
 
-// One input: its file, reader, and header. The header is read on the main thread; records are
-// read by `produce` on the side's own thread. Never moved after `open`: the reader points into
-// `input`.
 pub const Side = struct {
     path: []const u8,
     file: std.Io.File,
@@ -33,25 +30,19 @@ pub const Side = struct {
     rules: Rules,
     slots: [QUEUE_DEPTH]Item = undefined,
     queue: std.Io.Queue(Item) = undefined,
-    // Arenas handed back by the comparing thread for reuse, so memory is allocated and freed on
-    // the reading thread instead of piling up in another thread's allocator cache.
     spare_slots: [QUEUE_DEPTH + 4]*std.heap.ArenaAllocator = undefined,
     spare: std.Io.Queue(*std.heap.ArenaAllocator) = undefined,
     allocator: std.mem.Allocator = undefined,
     io: std.Io = undefined,
     failure: ?anyerror = null,
-    // The reader's diagnostic for the failure, when it gave one; set before `failure`.
     reason_buffer: [512]u8 = undefined,
     reason: []const u8 = "",
     spectra: usize = 0,
     chromatograms: usize = 0,
-    // Each instrument configuration's component facts by id, for the scans that refer to it.
     configurations: std.StringHashMapUnmanaged([]const Fact) = .empty,
     default_configuration: ?[]const u8 = null,
-    // What is wrong with the indexed wrapper's tail, or null.
     trailer: ?[]const u8 = null,
     configuration_arena: std.heap.ArenaAllocator = undefined,
-    // The repeating strings of this side's facts, shared by its items; outlives every item.
     interner: compare.Interner = undefined,
 
     pub fn open(self: *Side, allocator: std.mem.Allocator, io: std.Io, path: []const u8, rules: *const Rules) !void {
@@ -62,7 +53,6 @@ pub const Side = struct {
         self.chromatograms = 0;
         self.file = try std.Io.Dir.cwd().openFile(io, path, .{});
         errdefer self.file.close(io);
-        // A directory opens like a file on Linux and fails only at the first read, obscurely.
         if ((try self.file.stat(io)).kind == .directory) return error.IsDir;
         self.input = self.file.reader(io, &self.buffer);
         self.reader = try mzml.StreamReader.init(allocator, &self.input.interface, .{});
@@ -86,7 +76,6 @@ pub const Side = struct {
         self.io = io;
     }
 
-    // An arena for the next record: a recycled one when available.
     fn arena(self: *Side) !*std.heap.ArenaAllocator {
         var one: [1]*std.heap.ArenaAllocator = undefined;
         if ((self.spare.get(self.io, &one, 0) catch 0) == 1) return one[0];
@@ -95,7 +84,6 @@ pub const Side = struct {
         return fresh;
     }
 
-    // Takes back a record's arena; frees it when the spare queue is full or closed.
     fn recycle(self: *Side, arena_state: *std.heap.ArenaAllocator) void {
         _ = arena_state.reset(.retain_capacity);
         const handed = self.spare.put(self.io, &.{arena_state}, 0) catch 0;
@@ -108,8 +96,6 @@ pub const Side = struct {
         while ((self.spare.get(self.io, &one, 1) catch 0) == 1) destroyArena(self.allocator, one[0]);
     }
 
-    // Collects each instrument configuration's components (source, analyzer, detector) as facts
-    // under the scan path, so a scan that names another configuration differs where it matters.
     fn readConfigurations(self: *Side) !void {
         const store = self.configuration_arena.allocator();
         self.default_configuration = self.header.run.attribute("defaultInstrumentConfigurationRef");
@@ -134,7 +120,6 @@ pub const Side = struct {
         self.file.close(io);
     }
 
-    // Keeps the reader's diagnostic for `err`, cut to the buffer, for main to report.
     fn explain(self: *Side, err: anyerror) anyerror {
         if (self.reader.diagnostic()) |diagnostic| {
             var writer = std.Io.Writer.fixed(&self.reason_buffer);
@@ -145,15 +130,12 @@ pub const Side = struct {
     }
 };
 
-// Records in flight per side; bounds memory to this many decoded records each.
 const QUEUE_DEPTH = 16;
 
-// One record, read and reduced to facts and arrays on its side's thread, owning its memory.
 pub const Item = struct {
     kind: model.Kind,
     id: []const u8,
     scan: ?u64,
-    // The chromatogram type term (TIC, base peak, SRM, ...), or "" without one.
     type: []const u8,
     facts: []Fact,
     elements: []const compare.Element,
@@ -161,7 +143,6 @@ pub const Item = struct {
     arena: *std.heap.ArenaAllocator,
     owner: *Side,
     used: bool = false,
-    // Which spectrum of its file this is (1 for the first); 0 for a chromatogram.
     position: usize = 0,
 
     pub fn free(self: *const Item, allocator: std.mem.Allocator) void {
@@ -175,8 +156,6 @@ fn destroyArena(allocator: std.mem.Allocator, arena_state: *std.heap.ArenaAlloca
     allocator.destroy(arena_state);
 }
 
-// Reads the side's records into owned items and queues them; closes the queue at the end. A read
-// failure is kept in `side.failure`.
 pub fn produce(allocator: std.mem.Allocator, io: std.Io, side: *Side) void {
     defer side.queue.close(io);
     while (true) {
@@ -216,8 +195,6 @@ fn makeItem(side: *Side, record: model.Record) !Item {
         .interner = &side.interner,
     };
     try collector.add(record.node, "", compare.NO_PARENT);
-    // Paths, keys, names, and units are stable already; values borrow from the reader's record, so
-    // copy them before it moves on.
     var type_key: []const u8 = "";
     for (facts.items) |*fact| {
         fact.text = try arena.dupe(u8, fact.text);
@@ -225,17 +202,12 @@ fn makeItem(side: *Side, record: model.Record) !Item {
         if (on_chromatogram and type_key.len == 0 and rules.isA(fact.key, "MS:1000626"))
             type_key = fact.key;
     }
-    // Each scan's instrument configuration, named or the run's default, as component facts. The
-    // configuration facts live as long as the side; only the element they belong to is new. The
-    // scan elements and the scan nodes are both in document order, so one pass walks them together.
     var scans = Scans.of(record.node);
     for (elements.items, 0..) |element, position| {
         if (!std.mem.eql(u8, element.path, SCAN_PATH)) continue;
         const scan = scans.next() orelse continue;
         const ref = scan.attribute("instrumentConfigurationRef") orelse side.default_configuration orelse continue;
         const components = side.configurations.get(ref) orelse {
-            // The reference borrows from the reader's record, which the reader thread reuses for
-            // the next one while this item waits to be compared: copy it like every other value.
             const owned = try arena.dupe(u8, ref);
             try facts.append(arena, compare.makeFact(SCAN_PATH, "instrumentConfiguration", "", owned, "", @intCast(position)));
             continue;
@@ -261,10 +233,6 @@ fn makeItem(side: *Side, record: model.Record) !Item {
     };
 }
 
-// Arrays in MS-Numpress, as a fact on the record (text and name are literals, so they outlive the
-// reader's record): the values compare the same, but readers without Numpress fail (Sage reads
-// the bytes as plain floats or drops the array). Base64 broken by whitespace is the other such
-// form, but zmz decodes the text as it streams and keeps none of it, so it is a zmz gap.
 fn noteArrayForm(facts: *std.ArrayList(Fact), arena: std.mem.Allocator, node: model.Node, groups: []const cv.Group) !void {
     const list = node.child(.binary_data_array_list) orelse return;
     for (list.children) |array| {
@@ -280,10 +248,8 @@ fn noteArrayForm(facts: *std.ArrayList(Fact), arena: std.mem.Allocator, node: mo
     }
 }
 
-// MS-Numpress linear, positive integer, and short logged float, alone and followed by zlib.
 const NUMPRESS = [_][]const u8{ "MS:1002312", "MS:1002313", "MS:1002314", "MS:1002746", "MS:1002747", "MS:1002748" };
 
-// A spectrum's scan nodes, in document order.
 const Scans = struct {
     children: []const model.Node,
     at: usize = 0,
@@ -303,10 +269,6 @@ const Scans = struct {
     }
 };
 
-// The reader stops at </mzML>, so the indexed wrapper's tail is checked here: it must end with
-// indexListOffset, fileChecksum, and </indexedmzML>, and the offset must point at <indexList
-// (or the whitespace before it). Returns what is wrong, or null. The offsets inside the index
-// and the checksum are left to mzValidate.
 fn checkTrailer(file: std.Io.File, io: std.Io) !?[]const u8 {
     const size = try file.length(io);
     var tail_buffer: [4096]u8 = undefined;
@@ -318,7 +280,6 @@ fn checkTrailer(file: std.Io.File, io: std.Io) !?[]const u8 {
     if (!std.mem.endsWith(u8, trimmed, "</indexedmzML>") or offset_text == null or checksum == null)
         return "no index trailer";
     const offset = std.fmt.parseInt(u64, std.mem.trim(u8, offset_text.?, " \t\r\n"), 10) catch return "offset is not a number";
-    // TRFP's offsets point at the indentation before the element, which readers accept.
     var head_buffer: [256]u8 = undefined;
     const got = if (offset < size) try file.readPositionalAll(io, &head_buffer, offset) else 0;
     const head = std.mem.trimStart(u8, head_buffer[0..got], " \t\r\n");
@@ -345,7 +306,6 @@ fn scanNumber(id: []const u8) ?u64 {
     return std.fmt.parseInt(u64, id[at + 5 .. end], 10) catch null;
 }
 
-// The consumer's view of one side: the item at hand, pulled from the side's queue.
 pub const Stream = struct {
     side: *Side,
     io: std.Io,
@@ -365,7 +325,6 @@ pub const Stream = struct {
         };
     }
 
-    // Hands over the current item; the caller frees it.
     pub fn take(self: *Stream) Item {
         const item = self.current.?;
         self.current = null;

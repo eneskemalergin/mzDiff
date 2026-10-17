@@ -29,7 +29,7 @@ You will see a few conventions; follow them where it is convenient, and I will a
 
 - tests sit beside the code in `src/`, build their inputs in memory, and never read files outside the repository;
 - tests are named `[type] - [target]: behavior`, for example `test "[unit] - [severity]: exact keys win over ancestry and the default"`;
-- comments explain why the code does something, not what it does or how it changed.
+- the only comments are a module overview of at most 10 lines at the top of each file and `// --- Name ---` dividers that split a file, such as the one before its tests; anything else a reader needs goes into names and types, or into the wiki.
 
 ## License
 

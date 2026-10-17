@@ -1,32 +1,13 @@
 #!/usr/bin/env python3
-"""Injects one defect at a time into spectra a search engine identifies, then runs both mzdiff
-and the engine (Sage) on the result, to set mzdiff's severity beside what a real consumer does.
+"""Injects one defect at a time into spectra Sage identifies and runs mzdiff, mzValidate, and Sage.
 
-usage: tools/consumer.py [-o OUT] [-n SCANS] [--sage P] [--validate P] --fasta P MZDIFF REFERENCE.mzML [CASE...]
-       tools/consumer.py --compare [-o OUT] [--sage P] [--validate P] --fasta P MZDIFF REFERENCE.mzML B.mzML...
+usage: tools/consumer.py [-o OUT] [-n SCANS] [--sage P] [--validate P] --fasta P MZDIFF REF [CASE...]
+       tools/consumer.py --compare [-o OUT] [--sage P] [--validate P] --fasta P MZDIFF REF B...
 
-Each case edits the same SCANS spectra (default 200): rank-1 target matches at 1% FDR in the
-reference, spread over the run. The engine's result for those spectra is then one of:
-
-  fatal    the run fails, or reads no spectra
-  lost     some edited spectra vanish from the results (dropped, not searched, or no candidate)
-  wrong    some edited spectra change peptide or charge, lose their 1% FDR match, or are
-           reported more than once
-  shifted  the same matches, with other scores, retention times, or masses
-  none     the edited spectra's results are unchanged
-
-and mzdiff's verdict is its most severe class (`indexListOffset` ignored: every edit shifts bytes).
-mzValidate's error rules are listed beside it (the `mzml.index.` rules ignored, for the same
-reason), since `corpus.sh` folds both into one status. A case is flagged MISSED when the engine is
-hurt (fatal, lost, wrong) and neither tool says major or an error, UNDER when the engine fails or
-loses spectra and mzdiff says major, STRICT when mzdiff says critical and the engine is unaffected
-(other consumers may still be). `--compare` runs the engine
-on converter outputs instead and compares every spectrum with the reference's results.
-
-Sage and mzValidate come from the mzBridge checkout (MZBRIDGE, default ../mzBridge beside this
-repository), as for corpus.sh. The FASTA (--fasta, or MZDIFF_FASTA) must match the reference's
-organism; the engine settings suit Orbitrap HCD runs.
-Writes OUT/consumer.tsv; the edited files are removed as soon as each case is done.
+Each case ends as fatal, lost, wrong, shifted, or none for the edited spectra, beside mzdiff's most
+severe class and mzValidate's error rules, flagged MISSED, UNDER, or STRICT where they disagree.
+Sage and mzValidate come from the mzBridge checkout (MZBRIDGE, default ../mzBridge). Writes
+OUT/consumer.tsv; the Development wiki page defines each outcome and flag.
 """
 import argparse, base64, csv, json, math, os, re, shutil, struct, subprocess, sys, zlib
 
@@ -54,10 +35,9 @@ SETTINGS = {
 
 
 class Skip(Exception):
-    """The reference has no structure for this case."""
+    pass
 
 
-# Edits of one spectrum's XML. Each returns the new block, or the same block when it does not apply.
 
 def param_line(block, accession):
     return re.search(rf'[ \t]*<cvParam [^>]*accession="{accession}"[^>]*/>\n', block)
@@ -108,8 +88,6 @@ def encode(xml, values, bits=None, compressed=None):
     return xml
 
 def with_arrays(change, bits=None, compressed=None, which=None):
-    """Decodes the m/z and intensity arrays, applies `change(mz, intensity)`, and encodes the
-    arrays named in `which` (all by default) again."""
     def edit(block):
         found = {("mz" if 'accession="MS:1000514"' in m.group(0) else "i"): m for m in arrays(block)
                  if 'accession="MS:1000514"' in m.group(0) or 'accession="MS:1000515"' in m.group(0)}
@@ -146,7 +124,6 @@ def wrap_base64(block):
     return re.sub(r"<binary>(.*?)</binary>", wrap, block, count=1, flags=re.S)
 
 def numpress_nibbles(x):
-    """One residual in MS-Numpress's half-byte integer code."""
     x &= 0xFFFFFFFF
     mask = 0xF0000000
     head = x & mask
@@ -159,7 +136,6 @@ def numpress_nibbles(x):
     return [0] + [(x >> (4 * j)) & 0xF for j in range(8)]
 
 def numpress_linear(values):
-    """MS-Numpress linear prediction, as the reference implementation writes it."""
     top = max(values[:2])
     for i in range(2, len(values)):
         guess = values[i - 1] + (values[i - 1] - values[i - 2])
@@ -178,7 +154,6 @@ def numpress_linear(values):
     return bytes(out)
 
 def numpress_array(xml):
-    """The m/z array re-encoded in MS-Numpress linear (no zlib), its other parameters kept."""
     values = decode(xml)
     if len(values) < 3:
         return xml
@@ -219,7 +194,6 @@ GROUP = ('      <referenceableParamGroup id="mzdiffMs2">\n'
          '      </referenceableParamGroup>\n')
 
 def group_header(text):
-    """Adds a parameter group holding ms level 2 and centroid to the header."""
     m = re.search(r'<referenceableParamGroupList count="(\d+)">\n', text)
     if m:
         return text[:m.start()] + f'<referenceableParamGroupList count="{int(m.group(1)) + 1}">\n' + GROUP + text[m.end():]
@@ -235,7 +209,6 @@ def group_ref(block):
     return block[:first] + '          <referenceableParamGroupRef ref="mzdiffMs2" />\n' + block[first:]
 
 def strip_index(text):
-    """The mzML without its indexedmzML wrapper, keeping the namespace the wrapper declared."""
     start = text.index("<mzML")
     end = text.index("</mzML>") + len("</mzML>")
     body = text[start:end]
@@ -243,12 +216,9 @@ def strip_index(text):
         body = '<mzML xmlns="http://psi.hupo.org/ms/mzml"' + body[len("<mzML"):]
     return '<?xml version="1.0" encoding="utf-8"?>\n' + body + "\n"
 
-# Each case: name, the edit of every chosen spectrum, and an optional edit of the whole file.
 CASES = [
-    # Anchors: what every consumer must see.
     ("drop_spectrum", lambda b: "", None),
     ("duplicate_spectrum", lambda b: b + b, None),
-    # Precursor.
     ("charge_changed", set_value("MS:1000041", lambda v: str(int(v) + 1)), None),
     ("charge_removed", drop_param("MS:1000041"), None),
     ("charge_spelled_2.0", set_value("MS:1000041", lambda v: v + ".0"), None),
@@ -261,7 +231,6 @@ CASES = [
     ("selected_intensity_removed", drop_param("MS:1000042"), None),
     ("spectrum_ref_removed", lambda b: re.sub(r' spectrumRef="[^"]*"', "", b, count=1), None),
     ("collision_energy_changed", set_value("MS:1000045", add(10)), None),
-    # Spectrum description.
     ("ms_level_1", set_value("MS:1000511", lambda v: "1"), None),
     ("ms_level_spelled_2.0", set_value("MS:1000511", lambda v: v + ".0"), None),
     ("centroid_removed", drop_param("MS:1000127"), None),
@@ -271,13 +240,11 @@ CASES = [
     ("filter_string_changed", set_value("MS:1000512", lambda v: v.replace("Full ms2", "Full msx")), None),
     ("injection_time_x2", set_value("MS:1000927", times(2)), None),
     ("ms_level_in_group", group_ref, group_header),
-    # Retention time.
     ("rt_unit_dropped", replace(' unitAccession="UO:0000031" unitName="minute" unitCvRef="UO"', ""), None),
     ("rt_minutes_labeled_seconds", replace('unitAccession="UO:0000031" unitName="minute"', 'unitAccession="UO:0000010" unitName="second"'), None),
     ("rt_in_seconds", rt_to_seconds, None),
     ("rt_plus_1min", set_value("MS:1000016", add(1.0)), None),
     ("rt_removed", drop_param("MS:1000016"), None),
-    # Peaks.
     ("intensity_array_removed", drop_array("MS:1000515"), None),
     ("top_peak_removed", with_arrays(drop_top_peak), None),
     ("peaks_descending", with_arrays(lambda mz, i: (mz[::-1], i[::-1])), None),
@@ -287,7 +254,6 @@ CASES = [
     ("base64_wrapped", wrap_base64, None),
     ("mz_numpress", numpress_mz, None),
     ("default_length_off", lambda b: re.sub(r'defaultArrayLength="(\d+)"', lambda m: f'defaultArrayLength="{int(m.group(1)) + 1}"', b, count=1), None),
-    # Identity and container.
     ("native_id_scan_only", lambda b: re.sub(r'id="controllerType=0 controllerNumber=1 (scan=\d+)"', r'id="\1"', b, count=1), None),
     ("index_removed", lambda b: b, strip_index),
 ]
@@ -301,8 +267,6 @@ def native_ids(path):
     return ids
 
 def load(path):
-    """Rank-1 results by scan number: peptide, charge, label, q, hyperscore, rt, expmass, and how
-    many rank-1 rows the scan has (more than one when a spectrum is written twice)."""
     rows = {}
     with open(path, newline="") as f:
         for row in csv.DictReader(f, delimiter="\t"):
@@ -336,7 +300,6 @@ def confident(row):
     return row["label"] == "1" and float(row["spectrum_q"]) <= 0.01
 
 def effect(ref, test, scans):
-    """Counts what happened to `scans` between two result sets."""
     lost = wrong = shifted = 0
     for s in scans:
         a, b = ref.get(s), test.get(s)
@@ -344,8 +307,6 @@ def effect(ref, test, scans):
             lost += 1
             continue
         moved = any(abs(float(a[k]) - float(b[k])) > 1e-4 for k in ("hyperscore", "rt", "expmass"))
-        # A match that falls below 1% FDR counts only when its own numbers moved: the engine's FDR
-        # step is not deterministic, and a few borderline matches cross the line between runs.
         if a["peptide"] != b["peptide"] or a["charge"] != b["charge"] or b["times"] != a["times"] or (moved and confident(a) and not confident(b)):
             wrong += 1
         elif moved:
@@ -371,7 +332,6 @@ def mzdiff(args, ref, mzml):
     return worst, ",".join(keys)[:80]
 
 def validate(args, mzml):
-    """mzValidate's error rules, apart from the index ones every edit breaks."""
     if not os.path.exists(args.validate):
         return "not run"
     run = subprocess.run([args.validate, "check", mzml], capture_output=True, text=True)

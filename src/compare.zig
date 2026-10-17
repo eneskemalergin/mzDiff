@@ -4,9 +4,9 @@
 //! cvParam, and userParam, with group references expanded. Facts are sorted and compared per
 //! (path, key), so parameter order, attribute order, whitespace, number spelling ("50" and
 //! "50.000"), and the order of repeated elements do not matter, except a spectrum's precursors,
-//! whose order says which stage each one is. Scan times in seconds are compared
-//! in minutes. Arrays are compared as decoded values, at 32-bit precision when either side stores
-//! 32 bits. Every difference is filed under a class (severity, kind, path, key) in a `Report`.
+//! whose order says which stage each one is. Scan times in seconds are compared in minutes.
+//! Arrays are compared as decoded values, at 32-bit precision when either side stores 32 bits.
+//! Every difference is filed under a class (severity, kind, path, key) in a `Report`.
 
 const std = @import("std");
 const zmz = @import("zmz");
@@ -72,8 +72,6 @@ pub const Kind = enum {
 
 pub const Example = struct { id: []const u8, a: []const u8, b: []const u8 };
 
-/// One difference as found, before it is filed under a class. Strings borrow from the caller and
-/// last only for the `Sink.emit` call.
 pub const Difference = struct {
     record: []const u8,
     severity: Severity,
@@ -86,11 +84,8 @@ pub const Difference = struct {
     array: ?ArrayDetail = null,
 };
 
-/// How a differing array differs: values compared, how many differ, and the largest difference
-/// (relative to the larger of the two values).
 pub const ArrayDetail = struct {
     values: usize,
-    /// The index the difference's `a` and `b` show.
     shown: usize = 0,
     differing: usize,
     largest: usize,
@@ -98,7 +93,6 @@ pub const ArrayDetail = struct {
     largest_b: f64,
 };
 
-/// Receives every difference `Report.add` files, in the order found.
 pub const Sink = struct {
     context: *anyopaque,
     emit: *const fn (*anyopaque, Difference) anyerror!void,
@@ -110,34 +104,26 @@ pub const Class = struct {
     path: []const u8,
     key: []const u8,
     name: []const u8,
-    /// Records (spectra, chromatograms, or the header) with at least one such difference.
     records: usize = 0,
     last_record: usize = std.math.maxInt(usize),
     examples: std.ArrayList(Example) = .empty,
 };
 
-// The most difference classes a report keeps one by one; see `Report.add`.
 const MAX_CLASSES = 4096;
 
 pub const Report = struct {
     allocator: std.mem.Allocator,
     rules: *Rules,
     max_examples: usize,
-    /// m/z parameters closer than this (parts per million) are a minor difference.
     ppm: f64 = 1.0,
     classes: std.StringHashMapUnmanaged(*Class) = .empty,
-    /// Serial number of the record being compared, so a class counts each record once.
     record: usize = 0,
-    /// Paths with a real difference in the current record (set by `diffFacts`).
     dirty: std.ArrayList([]const u8) = .empty,
-    // Scratch for `sortFacts`, reused across records.
     runs: std.ArrayList(Run) = .empty,
     reordered: std.ArrayList(Fact) = .empty,
-    // `diffFacts` scratch: groups on one side only, and the terms paired between them.
     only_a: std.ArrayList(usize) = .empty,
     only_b: std.ArrayList(usize) = .empty,
     terms: std.ArrayList(TermPair) = .empty,
-    /// Sees every difference before it is filed, for `--list`.
     sink: ?Sink = null,
 
     pub fn init(allocator: std.mem.Allocator, rules: *Rules, max_examples: usize) Report {
@@ -169,7 +155,6 @@ pub const Report = struct {
         self.terms.deinit(self.allocator);
     }
 
-    /// Like `add`, and marks the path as holding a real difference in this record.
     fn addDirty(
         self: *Report,
         severity: ?Severity,
@@ -185,7 +170,6 @@ pub const Report = struct {
         try self.add(severity, kind, path, key, name, id, a, b);
     }
 
-    /// Files one difference. `severity` null means "from the rules for key".
     pub fn add(
         self: *Report,
         severity: ?Severity,
@@ -200,7 +184,6 @@ pub const Report = struct {
         try self.addDetailed(severity, kind, path, key, name, id, a, b, null);
     }
 
-    /// `add` with an array's detail for the sink.
     pub fn addDetailed(
         self: *Report,
         severity: ?Severity,
@@ -213,10 +196,8 @@ pub const Report = struct {
         b: []const u8,
         array: ?ArrayDetail,
     ) !void {
-        // `--set` wins even over a severity the check chose itself (a tolerance, a lost record).
         var level = self.rules.overridden(key) orelse severity orelse self.rules.severity(key);
         if (level == .ignored) return;
-        // fileContent summarises the spectra, which are compared themselves.
         if (level == .critical and std.mem.indexOf(u8, path, "fileContent") != null) level = .major;
         if (self.sink) |sink| try sink.emit(sink.context, .{
             .record = id,
@@ -232,9 +213,6 @@ pub const Report = struct {
         var key_buffer: [512]u8 = undefined;
         var class_key = std.fmt.bufPrint(&key_buffer, "{s}\x1f{s}\x1f{s}", .{ path, key, @tagName(kind) }) catch
             try std.fmt.allocPrint(self.allocator, "{s}\x1f{s}\x1f{s}", .{ path, key, @tagName(kind) });
-        // Past MAX_CLASSES, a new key joins one class per path and kind instead of making its own,
-        // so endless distinct keys in a file cannot grow the report without bound; the list and
-        // the sink still see every difference.
         var class_name = name;
         var class_name_key = key;
         if (self.classes.count() >= MAX_CLASSES and !self.classes.contains(class_key)) {
@@ -273,7 +251,6 @@ pub const Report = struct {
         }
     }
 
-    /// Classes sorted by severity, then by records hit, then by path and key.
     pub fn sorted(self: *const Report, allocator: std.mem.Allocator) ![]*Class {
         const list = try allocator.alloc(*Class, self.classes.count());
         var it = self.classes.valueIterator();
@@ -292,7 +269,6 @@ pub const Report = struct {
     }
 };
 
-// At most 160 bytes, cut before a UTF-8 continuation byte so the output stays valid text.
 fn clip(text: []const u8) []const u8 {
     var end = @min(text.len, 160);
     while (end > 0 and end < text.len and text[end] & 0xC0 == 0x80) end -= 1;
@@ -308,27 +284,14 @@ pub const Fact = struct {
     text: []const u8,
     number: ?f64,
     unit: []const u8,
-    /// What `number` was multiplied by to reach the compared unit (1/60 for seconds read as
-    /// minutes), so the printed precision of `text` scales with it.
     scale: f64 = 1,
-    /// The element the fact belongs to: an index into the record's `Element` list.
     element: u32 = 0,
 };
 
-/// One element of a record, in document order; facts point at their element, elements at their
-/// parent, so repeated elements (two precursors, say) can be compared as wholes.
 pub const Element = struct { path: []const u8, parent: u32 };
 
 pub const NO_PARENT = std.math.maxInt(u32);
 
-/// Collects the facts of a node and its children. Binary arrays are left to `compareArrays`; the
-/// elements in `skip` (header lists) are left out with their children. With `elements`, each
-/// element visited is listed and each fact names its element.
-/// Strings that repeat across one side's records (element paths, keys, names, units), copied once
-/// and shared by every fact after, with each key's severity looked up once. One per reading thread,
-/// so it needs no lock; its strings live until `deinit`. Past `limit` bytes it takes no new strings
-/// and `get` returns null, so a file with endless distinct keys costs per-record copies, not
-/// unbounded memory.
 pub const Interner = struct {
     arena: std.heap.ArenaAllocator,
     strings: std.StringHashMapUnmanaged(?KeyInfo) = .empty,
@@ -343,10 +306,8 @@ pub const Interner = struct {
         self.arena.deinit();
     }
 
-    /// Returns the shared copy of `text`, or null once the interner is full.
     pub fn get(self: *Interner, text: []const u8) !?[]const u8 {
         if (self.strings.getKey(text)) |found| return found;
-        // The map's own entries count too, roughly.
         if (self.bytes + text.len + 32 > self.limit) return null;
         const arena = self.arena.allocator();
         const copy = try arena.dupe(u8, text);
@@ -364,10 +325,8 @@ pub const Interner = struct {
     }
 };
 
-/// What the rules say about a key, looked up once per key and reader.
 const KeyInfo = struct {
     severity: Severity,
-    /// The vocabulary types the key's value as an integer.
     integer: bool,
 
     fn of(rules: *Rules, key: []const u8) KeyInfo {
@@ -379,7 +338,6 @@ fn inRecord(path: []const u8) bool {
     return std.mem.startsWith(u8, path, "spectrum") or std.mem.startsWith(u8, path, "chromatogram");
 }
 
-// Whether `text` is an XSD integer: an optional sign and digits, around optional whitespace.
 fn integerSpelling(text: []const u8) bool {
     const trimmed = std.mem.trim(u8, text, " \t\r\n");
     const digits = if (trimmed.len != 0 and (trimmed[0] == '+' or trimmed[0] == '-')) trimmed[1..] else trimmed;
@@ -395,12 +353,8 @@ pub const Collector = struct {
     elements: ?*std.ArrayList(Element) = null,
     groups: []const cv.Group,
     skip: []const model.Kind = &.{},
-    /// When set, every fact's path, key, name, and unit is a stable copy (shared or in `arena`);
-    /// only its text still borrows from the record.
     interner: ?*Interner = null,
 
-    // A stable copy of a repeating string: shared when the interner has room, else in the arena.
-    // Without an interner the string is returned as it is, borrowed.
     fn stable(self: *const Collector, text: []const u8) ![]const u8 {
         const interner = self.interner orelse return text;
         return (try interner.get(text)) orelse try self.arena.dupe(u8, text);
@@ -437,10 +391,6 @@ pub const Collector = struct {
             try self.facts.append(self.arena, makeFact(path, key, "", attribute.value, "", element));
         }
 
-        // Whether a spectrum or chromatogram takes parameters through a group is a fact of its own
-        // (the group's id is bookkeeping): the parameters compare as if written inline, but some
-        // readers (Sage) ignore groups and miss what they hold. The header's groups, which every
-        // header reader resolves, are not noted.
         if (inRecord(path)) for (node.params) |entry| if (entry == .group_ref) {
             try self.facts.append(self.arena, makeFact(path, "form:paramGroup", "parameters through a group", "", "", element));
             break;
@@ -450,8 +400,6 @@ pub const Collector = struct {
         while (try params.next()) |entry| switch (entry) {
             .cv => |param| {
                 const key = try self.stable(if (param.accession) |accession| accession.raw else param.name orelse continue);
-                // An integer-typed value spelled otherwise ("2.0" for a charge) is the same number,
-                // but outside the standard: readers that parse the declared type refuse the file.
                 const info = self.infoOf(key);
                 if (param.value) |value| if (info.integer and !integerSpelling(value))
                     try self.facts.append(self.arena, makeFact(path, "form:integer", "integer value written otherwise", key, "", element));
@@ -489,7 +437,6 @@ pub const Collector = struct {
     }
 };
 
-/// Shorthand for `Collector.add` without element tracking, as the header uses it.
 pub fn collect(
     arena: std.mem.Allocator,
     rules: *Rules,
@@ -503,7 +450,6 @@ pub fn collect(
     try collector.add(node, prefix, NO_PARENT);
 }
 
-/// A fact with its value parsed; times in seconds become minutes.
 pub fn makeFact(path: []const u8, key: []const u8, name: []const u8, value: []const u8, unit: []const u8, element: u32) Fact {
     const text = std.mem.trim(u8, value, " \t\r\n");
     const number: ?f64 = if (text.len == 0) null else std.fmt.parseFloat(f64, text) catch null;
@@ -526,8 +472,6 @@ fn unitOf(unit: anytype) []const u8 {
 
 // --- Fact comparison ---
 
-/// Compares two fact lists (sorted here) and files each differing (path, key) once per record.
-/// The paths of real differences (not tolerance-level ones) are kept in `report.dirty`.
 pub fn diffFacts(report: *Report, id: []const u8, a: []Fact, b: []Fact) !void {
     report.dirty.clearRetainingCapacity();
     try sortFacts(report, a);
@@ -543,8 +487,6 @@ pub fn diffFacts(report: *Report, id: []const u8, a: []Fact, b: []Fact) !void {
             if (partnerOf(report, i)) |pair| {
                 const x = a[i];
                 const y = b[pair.b];
-                // One term in place of another: a more specific one costs nothing, any other has
-                // the severity of what both name (`--set` on A's term still wins).
                 const severity: ?Severity = if (pair.specific) .minor else null;
                 try report.addDirty(severity, if (pair.specific) .specific else .term, x.path, x.key, report.rules.name(pair.category) orelse "", id, orKey(x), orKey(y));
             } else try report.addDirty(null, .missing, a[i].path, a[i].key, a[i].name, id, a[i].text, "");
@@ -568,10 +510,6 @@ pub fn diffFacts(report: *Report, id: []const u8, a: []Fact, b: []Fact) !void {
 
 const TermPair = struct { a: usize, b: usize, category: []const u8, specific: bool };
 
-// Pairs the terms without a value found on one side only, at the same element and in the same
-// category of the vocabulary (two analyzers, two polarities): one term written in place of the
-// other reads as one difference, not a missing and an extra. Each term pairs at most once, the
-// first in key order.
 fn pairTerms(report: *Report, a: []const Fact, b: []const Fact) !void {
     report.terms.clearRetainingCapacity();
     report.only_a.clearRetainingCapacity();
@@ -618,8 +556,6 @@ fn orKey(fact: Fact) []const u8 {
     return if (fact.name.len != 0) fact.name else fact.key;
 }
 
-/// Sorts and drops exact repeats (same path, key, value, unit): header facts compare as a set,
-/// so a model named once per instrument configuration is not a count difference.
 pub fn dedupe(facts: []Fact) []Fact {
     std.mem.sortUnstable(Fact, facts, {}, factLess);
     var kept: usize = 0;
@@ -636,9 +572,6 @@ pub fn dedupe(facts: []Fact) []Fact {
 
 const Run = struct { path: []const u8, start: usize, end: usize };
 
-// Sorts facts by `factLess`, using the order they arrive in: a record's facts come grouped by
-// element, so sorting the runs of one path (a dozen or so) and then each path's facts by key costs
-// far fewer comparisons than sorting them all at once. The result is the same order.
 fn sortFacts(report: *Report, facts: []Fact) !void {
     const allocator = report.allocator;
     report.runs.clearRetainingCapacity();
@@ -661,7 +594,6 @@ fn sortFacts(report: *Report, facts: []Fact) !void {
         for (runs) |run| report.reordered.appendSliceAssumeCapacity(facts[run.start..run.end]);
         @memcpy(facts, report.reordered.items);
     }
-    // Each path's facts, now adjacent (repeated elements included), by key and value.
     start = 0;
     while (start < facts.len) {
         var end = start + 1;
@@ -671,7 +603,6 @@ fn sortFacts(report: *Report, facts: []Fact) !void {
     }
 }
 
-// A total order: by path, key, value (numbers first, NaN after other numbers), text, then unit.
 fn factLess(_: void, x: Fact, y: Fact) bool {
     var order = orderText(x.path, y.path);
     if (order != .eq) return order == .lt;
@@ -690,7 +621,6 @@ fn factLess(_: void, x: Fact, y: Fact) bool {
     return std.mem.order(u8, x.unit, y.unit) == .lt;
 }
 
-// Interned strings of one side are the same pointer, which settles most comparisons at once.
 fn orderText(a: []const u8, b: []const u8) std.math.Order {
     if (a.ptr == b.ptr and a.len == b.len) return .eq;
     return std.mem.order(u8, a, b);
@@ -716,8 +646,6 @@ fn groupEnd(facts: []const Fact, start: usize) usize {
     return end;
 }
 
-// A total ion current of zero where A has one: readers take it for an empty spectrum and skip it
-// (Sage drops the spectrum without a word), so the spectrum is lost to them, not just a value.
 fn emptied(x: Fact, y: Fact) ?Severity {
     if (!std.mem.eql(u8, x.key, "MS:1000285")) return null;
     const p = x.number orelse return null;
@@ -751,7 +679,6 @@ fn diffGroup(report: *Report, id: []const u8, a: []const Fact, b: []const Fact) 
                 continue;
             }
             try report.add(oneSidedUnit(report, x.key, x.unit), .unit, x.path, x.key, x.name, id, orDash(x.unit), orDash(y.unit));
-            // With a unit on one side only, the values compare as printed, not converted.
             x = asPrinted(x);
             y = asPrinted(y);
         }
@@ -763,14 +690,9 @@ fn diffGroup(report: *Report, id: []const u8, a: []const Fact, b: []const Fact) 
     }
 }
 
-// A unit on one side only leaves the value as it was. One B adds is minor (mzValidate judges
-// whether the term allows it); one B drops costs readers the unit: never more than major, except
-// for a time, which means nothing without one.
 fn oneSidedUnit(report: *Report, key: []const u8, unit_a: []const u8) Severity {
     if (unit_a.len == 0) return .minor;
     const level = report.rules.severity(key);
-    // A time without its unit could be seconds or minutes, and readers refuse it or misread it
-    // sixtyfold; any other unit is implied by the term, so dropping it costs at most major.
     if (std.mem.eql(u8, unit_a, MINUTE) or std.mem.eql(u8, unit_a, SECOND)) return level;
     return if (level == .critical) .major else level;
 }
@@ -788,7 +710,6 @@ fn orDash(text: []const u8) []const u8 {
 
 const Verdict = enum { same, narrow, rounding, ppm, different };
 
-// How two values of the same key compare: equal, equal within a tolerance (and which), or not.
 fn compareValues(ppm: f64, x: Fact, y: Fact) Verdict {
     if (x.number != null and y.number != null) {
         const p = x.number.?;
@@ -804,8 +725,6 @@ fn compareValues(ppm: f64, x: Fact, y: Fact) Verdict {
     return .different;
 }
 
-// "2015-10-14T03:22:49.630Z" -> "2015-10-14T03:22:49.63": trailing zeros of the seconds
-// fraction and the zone letter Z carry no information.
 fn trimFraction(text: []const u8) []const u8 {
     var end = text.len;
     if (end > 0 and text[end - 1] == 'Z') end -= 1;
@@ -815,12 +734,6 @@ fn trimFraction(text: []const u8) []const u8 {
     return text[0..end];
 }
 
-/// True when two numbers are the same value printed with different rounding. With the same
-/// number of decimals they may differ by one unit in the last place ("79.106" and "79.107", one
-/// side rounded from a 32-bit value); with different numbers, the shorter must be the longer
-/// rounded to its places, within half a unit of each. A scale (1/60 for seconds read as minutes)
-/// carries each spelling's precision into the compared unit. A value printed as an integer is
-/// never a rounding: "26" against "26.112" is a nominal value, not the measured one.
 fn lastDigit(text_a: []const u8, text_b: []const u8, a: f64, b: f64, scale_a: f64, scale_b: f64) bool {
     const da = decimals(text_a) orelse return relativeClose(a, b);
     const db = decimals(text_b) orelse return relativeClose(a, b);
@@ -831,7 +744,6 @@ fn lastDigit(text_a: []const u8, text_b: []const u8, a: f64, b: f64, scale_a: f6
     return @abs(a - b) <= tolerance * 1.000001;
 }
 
-// Parameters that hold an m/z value, compared with the ppm tolerance.
 fn isMz(key: []const u8) bool {
     const keys = [_][]const u8{
         "MS:1000744", "MS:1000040", "MS:1000827", "MS:1000504", "MS:1000528", "MS:1000527",
@@ -840,9 +752,6 @@ fn isMz(key: []const u8) bool {
     return false;
 }
 
-/// True when the values agree to 32-bit precision: they round to the same 32-bit float, or lie
-/// within one 32-bit epsilon (2^-23, relative) when rounding falls on either side of a boundary.
-/// One side stored or printed a 32-bit value, the other the 64-bit value it came from.
 fn sameAt32(a: f64, b: f64) bool {
     const x: f32 = @floatCast(a);
     const y: f32 = @floatCast(b);
@@ -854,7 +763,6 @@ fn relativeClose(a: f64, b: f64) bool {
     return @abs(a - b) <= 1e-6 * @max(@abs(a), @abs(b));
 }
 
-// Digits after the decimal point; null for exponent notation.
 fn decimals(text: []const u8) ?usize {
     if (std.mem.indexOfAny(u8, text, "eE") != null) return null;
     const dot = std.mem.indexOfScalar(u8, text, '.') orelse return 0;
@@ -863,12 +771,6 @@ fn decimals(text: []const u8) ?usize {
 
 // --- Repeated elements ---
 
-/// Checks that repeated elements (two precursors, two scan windows) keep their values together:
-/// facts compared per (path, key) would not notice charge 2 and charge 3 trading places between
-/// two precursors. For each path that repeats in a record and holds no real difference already,
-/// every element of A, with its descendants, must match a distinct element of B within the
-/// usual tolerances. Elements present on one side only are counted too. Call after `diffFacts`,
-/// which sorts the facts and fills `report.dirty`.
 pub fn diffGrouping(
     report: *Report,
     scratch: std.mem.Allocator,
@@ -878,7 +780,6 @@ pub fn diffGrouping(
     b: []const Fact,
     elements_b: []const Element,
 ) !void {
-    // Paths filed as regrouped; their descendants would only repeat the same finding.
     var filed: std.ArrayList([]const u8) = .empty;
     for (elements_a, 0..) |element, position| {
         if (!firstOfPath(elements_a, position)) continue;
@@ -906,8 +807,6 @@ pub fn diffGrouping(
         const groups_b = try subtrees(scratch, b, elements_b, element.path, count_b);
         const taken = try scratch.alloc(bool, groups_b.len);
         @memset(taken, false);
-        // B's elements by the hash of their exact contents: an element of A finds an exact partner
-        // by binary search, however many elements repeat or however they are ordered.
         const index = try scratch.alloc(Hashed, groups_b.len);
         for (groups_b, index, 0..) |group, *entry, at| entry.* = .{ .hash = subtreeHash(group.items), .at = at };
         std.mem.sortUnstable(Hashed, index, {}, Hashed.less);
@@ -925,8 +824,6 @@ pub fn diffGrouping(
             try reportRegrouped(report, scratch, id, element.path, groups_a[position_a].items, groups_b, taken);
             try filed.append(scratch, element.path);
         } else if (moved and ordered(element.path)) {
-            // The same elements in another order, where the order carries meaning: shown by the
-            // m/z of the first one on each side, the one a reader takes.
             const first_a = try firstMz(scratch, groups_a[0].items);
             const first_b = try firstMz(scratch, groups_b[0].items);
             try report.add(null, .element_order, element.path, "precursorOrder", "precursors", id, first_a, first_b);
@@ -948,8 +845,6 @@ const Hashed = struct {
     }
 };
 
-// A hash of an element's facts exactly as written (path, key, unit, text), the same on both sides
-// for elements that match without any tolerance.
 fn subtreeHash(facts: []const Fact) u64 {
     var hasher = std.hash.Wyhash.init(0);
     for (facts) |fact| {
@@ -978,9 +873,6 @@ fn matchExact(ppm: f64, group: []const Fact, groups: []const std.ArrayList(Fact)
     return null;
 }
 
-// Elements of B that match only within a tolerance this many places either side of the same
-// position are looked for; further away, the element is filed as regrouped. It keeps the search
-// linear however many elements repeat.
 const NEAR = 512;
 
 fn matchNear(ppm: f64, group: []const Fact, groups: []const std.ArrayList(Fact), taken: []bool, position: usize) ?usize {
@@ -1003,8 +895,6 @@ fn firstMz(scratch: std.mem.Allocator, facts: []const Fact) ![]const u8 {
     return "";
 }
 
-// Repeated elements whose order carries meaning: a spectrum's precursors run from the nearest
-// stage back, and readers take the first as the precursor of the spectrum.
 fn ordered(path: []const u8) bool {
     return std.mem.eql(u8, path, "spectrum/precursorList/precursor");
 }
@@ -1032,7 +922,6 @@ fn isDirty(report: *const Report, path: []const u8) bool {
     return false;
 }
 
-// The facts under each element at `path`, in the order the facts are sorted.
 fn subtrees(
     scratch: std.mem.Allocator,
     facts: []const Fact,
@@ -1042,7 +931,6 @@ fn subtrees(
 ) ![]std.ArrayList(Fact) {
     const groups = try scratch.alloc(std.ArrayList(Fact), count);
     for (groups) |*group| group.* = .empty;
-    // Each element at `path`, numbered in document order.
     const slot = try scratch.alloc(u32, elements.len);
     var next: u32 = 0;
     for (elements, slot) |element, *s| {
@@ -1073,8 +961,6 @@ fn sameSubtree(ppm: f64, a: []const Fact, b: []const Fact) bool {
     return true;
 }
 
-// Files the first unmatched element of A against the unused element of B closest to it, under
-// the most severe key that differs between them, so the rules and `--set` apply as usual.
 fn reportRegrouped(
     report: *Report,
     scratch: std.mem.Allocator,
@@ -1128,7 +1014,6 @@ fn reportRegrouped(
     );
 }
 
-// "MS:1000744=641.29 MS:1000041=2 ...", the facts of one element with paths relative to it.
 fn summarize(scratch: std.mem.Allocator, path: []const u8, facts: []const Fact) ![]const u8 {
     var text: std.ArrayList(u8) = .empty;
     for (facts, 0..) |fact, i| {
@@ -1142,11 +1027,8 @@ fn summarize(scratch: std.mem.Allocator, path: []const u8, facts: []const Fact) 
 
 // --- Arrays ---
 
-/// A decoded array: its role key (`array:ACCESSION`), the unit its role term carries, and values.
 pub const Role = struct { key: []const u8, unit: []const u8 = "", values: mzml.DecodedArrays.Values };
 
-/// The record's decoded arrays keyed by role. With `copy`, the values are copied into `arena` so
-/// they outlive the reader's next record.
 pub fn roles(
     arena: std.mem.Allocator,
     record: model.Record,
@@ -1170,7 +1052,6 @@ pub fn roles(
     return list.items;
 }
 
-/// Compares two records' arrays, matched by role. `path` names the record kind.
 pub fn compareArrays(
     report: *Report,
     arena: std.mem.Allocator,
@@ -1179,7 +1060,6 @@ pub fn compareArrays(
     arrays_a: []const Role,
     arrays_b: []const Role,
 ) !void {
-    // Checked once per record, on the first peak array that differs.
     var order_checked = false;
     var reordered = false;
 
@@ -1190,7 +1070,6 @@ pub fn compareArrays(
         };
         var x = x_raw;
         if (!std.mem.eql(u8, x.unit, y.unit)) {
-            // Seconds and minutes are the same time; anything else is a different meaning.
             if (std.mem.eql(u8, x.unit, SECOND) and std.mem.eql(u8, y.unit, MINUTE)) {
                 x.values = try toMinutes(arena, x.values);
             } else if (std.mem.eql(u8, x.unit, MINUTE) and std.mem.eql(u8, y.unit, SECOND)) {
@@ -1225,9 +1104,6 @@ pub fn compareArrays(
             if (!order_checked) {
                 order_checked = true;
                 reordered = try samePeaks(arena, arrays_a, arrays_b);
-                // Not a tolerance: readers that deisotope or search the peaks assume rising m/z, and
-                // Sage matches other peptides when they fall instead, so the order is a difference
-                // at the arrays' severity (major, `--set array:peaks=...`).
                 if (reordered) try report.add(null, .peak_order, path, "array:peaks", "m/z and intensity pairs", id, "", "");
             }
             if (reordered) continue;
@@ -1235,7 +1111,6 @@ pub fn compareArrays(
         const shown = mismatch.beyond orelse at;
         const ta = try std.fmt.allocPrint(arena, "[{d}] {d}", .{ shown, valueAt(x.values, shown) });
         const tb = try std.fmt.allocPrint(arena, "[{d}] {d}", .{ shown, valueAt(y.values, shown) });
-        // Counting every differing value costs a pass, so it is done only for a listing.
         var detail: ?ArrayDetail = if (report.sink != null) arrayDetail(x.values, y.values) else null;
         if (detail) |*found| found.shown = shown;
         if (mismatch.beyond == null) {
@@ -1251,8 +1126,6 @@ pub fn compareArrays(
     }
 }
 
-// How many arrays before `position` share its key: the second array of one role pairs with the
-// second of the other side, not the first again.
 fn rank(list: []const Role, position: usize) usize {
     var count: usize = 0;
     for (list[0..position]) |role| count += @intFromBool(std.mem.eql(u8, role.key, list[position].key));
@@ -1294,7 +1167,6 @@ fn roleKey(arena: std.mem.Allocator, node: model.Node, groups: []const cv.Group)
     return "array:unknown";
 }
 
-// The unit on the array's role term (the first term that is not about encoding).
 fn arrayUnit(node: model.Node, groups: []const cv.Group) ![]const u8 {
     var params: cv.EffectiveIterator = .{ .entries = node.params, .groups = groups };
     while (try params.next()) |entry| switch (entry) {
@@ -1311,12 +1183,8 @@ fn arrayUnit(node: model.Node, groups: []const cv.Group) ![]const u8 {
 
 fn isEncodingTerm(accession: []const u8) bool {
     const terms = [_][]const u8{
-        // primitives
         "MS:1000519", "MS:1000520", "MS:1000521", "MS:1000522", "MS:1000523",
-        // zlib, none
-        "MS:1000574", "MS:1000576",
-        // numpress
-        "MS:1002312", "MS:1002313", "MS:1002314",
+        "MS:1000574", "MS:1000576", "MS:1002312", "MS:1002313", "MS:1002314",
         "MS:1002746", "MS:1002747", "MS:1002748",
     };
     for (terms) |term| if (std.mem.eql(u8, accession, term)) return true;
@@ -1348,15 +1216,10 @@ fn valueAt(values: mzml.DecodedArrays.Values, at: usize) f64 {
 }
 
 const Mismatch = struct {
-    // First index whose values differ at all (beyond what 32-bit storage explains when either
-    // side is 32-bit).
     exact: ?usize = null,
-    // First index whose values differ beyond the tolerance.
     beyond: ?usize = null,
 };
 
-// Finds differing values. `ppm` > 0 compares within that many parts per million (m/z arrays);
-// otherwise within 32-bit precision.
 fn firstMismatch(a: mzml.DecodedArrays.Values, b: mzml.DecodedArrays.Values, ppm: f64) Mismatch {
     if (a == .float64 and b == .float64 and std.mem.eql(u8, std.mem.sliceAsBytes(a.float64), std.mem.sliceAsBytes(b.float64))) return .{};
     if (a == .float32 and b == .float32 and std.mem.eql(u8, std.mem.sliceAsBytes(a.float32), std.mem.sliceAsBytes(b.float32))) return .{};
@@ -1398,8 +1261,6 @@ fn arrayDetail(a: mzml.DecodedArrays.Values, b: mzml.DecodedArrays.Values) Array
     return detail;
 }
 
-// Whether both records hold the same (m/z, intensity) pairs in another order. Pairs already in
-// the same order are not reordered, even when they differ below 32-bit precision.
 fn samePeaks(arena: std.mem.Allocator, arrays_a: []const Role, arrays_b: []const Role) !bool {
     const pa = try pairs(arena, arrays_a) orelse return false;
     const pb = try pairs(arena, arrays_b) orelse return false;
@@ -1417,7 +1278,6 @@ fn samePairs(a: []const [2]f32, b: []const [2]f32) bool {
     return true;
 }
 
-// The record's (m/z, intensity) pairs at 32-bit precision, in array order.
 fn pairs(arena: std.mem.Allocator, list: []const Role) !?[][2]f32 {
     const mz = (find(list, "array:MS:1000514") orelse return null).values;
     const intensity = (find(list, "array:MS:1000515") orelse return null).values;
@@ -1439,7 +1299,6 @@ test "[unit] - [values]: last-digit differences are rounding, larger ones are no
     try std.testing.expect(!lastDigit("0.5", "0.75", 0.5, 0.75, 1, 1));
     try std.testing.expect(!lastDigit("79", "80", 79, 80, 1, 1));
     try std.testing.expect(lastDigit("1.5e3", "1.5000001e3", 1500, 1500.0001, 1, 1));
-    // The shorter spelling must be the longer one rounded: 1.59 rounds to 1.6, not 1.5.
     try std.testing.expect(lastDigit("1.6", "1.59", 1.6, 1.59, 1, 1));
     try std.testing.expect(!lastDigit("1.5", "1.59", 1.5, 1.59, 1, 1));
     try std.testing.expect(!lastDigit("26.11219024658203", "26", 26.11219024658203, 26, 1, 1));
@@ -1458,7 +1317,6 @@ test "[edge] - [values]: equal NaNs compare as the same and NaN against a number
     const number = makeFact("spectrum", "MS:1000285", "", "15869.6875", "", 0);
     try std.testing.expectEqual(Verdict.same, compareValues(1, nan, also_nan));
     try std.testing.expectEqual(Verdict.different, compareValues(1, nan, number));
-    // Opposite signs, so the arrays differ as bytes and the NaN check itself decides.
     const a = [_]f64{ std.math.nan(f64), 1 };
     const b = [_]f64{ -std.math.nan(f64), 1 };
     const c = [_]f64{ 1, 1 };
@@ -1471,7 +1329,6 @@ test "[unit] - [arrays]: peaks in the same order are not reordered when an inten
     defer arena.deinit();
     const mz = [_]f64{ 100, 200, 300 };
     const intensity_a = [_]f64{ 10, 20, 30 };
-    // Below 32-bit precision: equal as 32-bit floats, different as 64-bit ones.
     const intensity_b = [_]f64{ 10, 20 * (1 + 5e-9), 30 };
     const a = [_]Role{
         .{ .key = "array:MS:1000514", .values = .{ .float64 = &mz } },
@@ -1498,7 +1355,6 @@ test "[property] - [facts]: sorting by path runs gives the same order as one ful
     var report = Report.init(allocator, &rules, 3);
     defer report.deinit();
     const ion = "spectrum/precursor/selectedIon";
-    // Two repeated elements, a path that returns after another, and ties broken by text and unit.
     const facts = [_]Fact{
         makeFact("spectrum", "MS:1000511", "", "2", "", 0),
         makeFact(ion, "MS:1000744", "", "641.29", "", 1),
@@ -1581,7 +1437,6 @@ test "[unit] - [facts]: a missing parameter and a changed value are filed with t
 }
 
 test "[edge] - [values]: seconds read as minutes keep the precision they were printed with" {
-    // 3000.12 s is 50.002 min; "50.1" min is 5.9 s away, far beyond the last printed digit.
     const a = makeFact("spectrum/scan", "MS:1000016", "", "3000.12", SECOND, 0);
     const b = makeFact("spectrum/scan", "MS:1000016", "", "50.1", MINUTE, 0);
     try std.testing.expectEqual(Verdict.different, compareValues(1, a, b));
@@ -1594,12 +1449,9 @@ test "[unit] - [facts]: a unit b drops is at most major, except a time's, and on
     var rules = Rules.init(allocator);
     defer rules.deinit();
     const MZ = "MS:1000040";
-    // Both keys are critical; the values match, so only the unit differs.
     const cases = [_]struct { key: []const u8, a: []const u8, b: []const u8, severity: Severity }{
-        // m/z is the selected ion's only unit: dropping it shows the cap.
         .{ .key = "MS:1000744", .a = MZ, .b = "", .severity = .major },
         .{ .key = "MS:1000744", .a = "", .b = MZ, .severity = .minor },
-        // A time without its unit could be seconds or minutes.
         .{ .key = "MS:1000016", .a = MINUTE, .b = "", .severity = .critical },
         .{ .key = "MS:1000016", .a = SECOND, .b = "", .severity = .critical },
         .{ .key = "MS:1000016", .a = "", .b = MINUTE, .severity = .minor },
@@ -1708,7 +1560,6 @@ test "[edge] - [regrouping]: thousands of reordered elements pair exactly, and o
         const window = try std.fmt.allocPrint(arena, "{d}", .{k * 2});
         try a.append(arena, makeFact(path, "MS:1000016", "", time, MINUTE, @intCast(k + 1)));
         try a.append(arena, makeFact(path, "MS:1000501", "", window, "", @intCast(k + 1)));
-        // B holds the same scans in reverse order.
         try b.append(arena, makeFact(path, "MS:1000016", "", time, MINUTE, @intCast(n - k)));
         try b.append(arena, makeFact(path, "MS:1000501", "", window, "", @intCast(n - k)));
     }
@@ -1717,7 +1568,6 @@ test "[edge] - [regrouping]: thousands of reordered elements pair exactly, and o
     try diffFacts(&report, "scan=1", a.items, b.items);
     try diffGrouping(&report, arena, "scan=1", a.items, elements.items, b.items, elements.items);
     try std.testing.expectEqual(@as(usize, 0), report.classes.count());
-    // Two windows trade places between scans: every value is still there, the pairs are not.
     var swapped = Report.init(allocator, &rules, 3);
     defer swapped.deinit();
     for (b.items) |*fact| {
@@ -1782,7 +1632,6 @@ test "[unit] - [regrouping]: precursors in another order are reported, once" {
         makeFact(ion, "MS:1000744", "", "641.29", "", 2), makeFact(ion, "MS:1000041", "", "2", "", 2),
         makeFact(ion, "MS:1000744", "", "427.53", "", 4), makeFact(ion, "MS:1000041", "", "3", "", 4),
     };
-    // The MS1 precursor first: a reader taking the first precursor gets 427.53 at charge 3.
     var b = [_]Fact{
         makeFact(ion, "MS:1000744", "", "427.53", "", 2), makeFact(ion, "MS:1000041", "", "3", "", 2),
         makeFact(ion, "MS:1000744", "", "641.29", "", 4), makeFact(ion, "MS:1000041", "", "2", "", 4),
@@ -1808,13 +1657,9 @@ test "[unit] - [facts]: a term in place of another of the same kind is one diffe
     defer rules.deinit();
     const path = "spectrum/scanList/scan/instrumentConfiguration/componentList/analyzer";
     const cases = [_]struct { a: []const u8, b: []const u8, kinds: []const Kind, severity: Severity }{
-        // FT-ICR against orbitrap: two analyzers.
         .{ .a = "MS:1000079", .b = "MS:1000484", .kinds = &.{.term}, .severity = .major },
-        // ion trap against radial ejection linear ion trap, a kind of ion trap.
         .{ .a = "MS:1000264", .b = "MS:1000083", .kinds = &.{.specific}, .severity = .minor },
-        // positive against negative scan.
         .{ .a = "MS:1000130", .b = "MS:1000129", .kinds = &.{.term}, .severity = .critical },
-        // An analyzer against a detector (inductive detector) are not one thing written two ways.
         .{ .a = "MS:1000079", .b = "MS:1000624", .kinds = &.{ .missing, .extra }, .severity = .major },
     };
     for (cases) |case| {

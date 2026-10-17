@@ -1,14 +1,11 @@
-//! Renders the view as one self-contained HTML page: a header with both files and the verdict, a
-//! filter bar (severity, search, layout, expand and collapse), and one collapsible section per
-//! differing record, its differences side by side or unified, with tooltips that explain every
-//! key, kind, and severity.
+//! Renders the view as one self-contained HTML page: both files and the verdict, a filter bar, and
+//! one collapsible section per differing record, side by side or unified.
 //!
-//! The page needs nothing from the network: its CSS and script are inline, and the script only
-//! hides, shows, and moves focus; it never builds markup. Every value from the files is escaped,
-//! in text and in attributes, so a hostile mzML cannot put markup or script into the page. Like
-//! the text view, the page is built in a bounded buffer while the comparison runs; past `records`
-//! records or `bytes` bytes it becomes a page that says how large the view would be and how to
-//! narrow it.
+//! The page fetches nothing: its CSS and script are inline, and the script only hides, shows, and
+//! moves focus; it never builds markup. Every value from the files is escaped, in text and in
+//! attributes, so a hostile mzML cannot put markup or script into the page. The page is built in a
+//! bounded buffer; past `records` records or `bytes` bytes it says how large the view would be and
+//! how to narrow it.
 
 const std = @import("std");
 
@@ -26,14 +23,11 @@ pub const Page = struct {
     tally: output.Tally,
     bytes: usize = 16 << 20,
     allocator: std.mem.Allocator,
-    // Finished records, and the record being built (its markup waits for its severity counts).
     body: std.Io.Writer.Allocating,
     record: std.Io.Writer.Allocating,
     record_id: std.ArrayList(u8) = .empty,
     last_path: std.ArrayList(u8) = .empty,
-    // The current record's shown differences per severity: critical, major, minor.
     counts: [3]usize = .{ 0, 0, 0 },
-    // Every shown difference per severity, for the filter bar.
     rows: [3]usize = .{ 0, 0, 0 },
 
     pub fn init(allocator: std.mem.Allocator, out: *std.Io.Writer, selection: output.Selection) Page {
@@ -71,7 +65,6 @@ pub const Page = struct {
         }
         if (self.tally.too_large) return;
         const w = &self.record.writer;
-        // Arrays sit under their own heading, apart from the record's parameters.
         const arrays = std.mem.startsWith(u8, difference.key, "array:");
         const path_matches = std.mem.startsWith(u8, self.last_path.items, difference.path) and
             std.mem.eql(u8, self.last_path.items[difference.path.len..], if (arrays) "/binaryDataArray" else "");
@@ -94,7 +87,6 @@ pub const Page = struct {
         if (self.body.written().len + self.record.written().len > self.bytes) self.drop();
     }
 
-    // Too much to show: keep counting, stop rendering.
     fn drop(self: *Page) void {
         self.tally.too_large = true;
         self.body.clearRetainingCapacity();
@@ -102,7 +94,6 @@ pub const Page = struct {
         self.record_id.clearRetainingCapacity();
     }
 
-    // Moves the finished record into the body, under a summary line with its counts.
     fn flush(self: *Page) !void {
         if (self.record_id.items.len == 0) return;
         defer {
@@ -123,7 +114,6 @@ pub const Page = struct {
         try w.writeAll("</table></details>\n");
     }
 
-    /// Writes the page: the view, or, when it grew too large, why and how to narrow it.
     pub fn finish(self: *Page, outcome: output.Outcome) !void {
         try self.flush();
         self.tally.close();
@@ -134,8 +124,6 @@ pub const Page = struct {
         try out.writeAll(" against ");
         try writeEscaped(out, std.fs.path.basename(outcome.b.path));
         try out.writeAll("</title>\n");
-        // The script is the tooltip table and the code; it is written once here, so the bytes the
-        // policy hashes are the bytes the page carries.
         var script: std.Io.Writer.Allocating = .init(self.allocator);
         defer script.deinit();
         try writeMeanings(&script.writer);
@@ -208,8 +196,6 @@ fn row(w: *std.Io.Writer, difference: Difference) !void {
     var label_buffer: [160]u8 = undefined;
     const label = output.describe(&label_buffer, difference);
     const tolerated = output.isTolerance(difference.kind);
-    // Tooltips for the severity and the kind come from the script's table on first hover, so the
-    // page does not repeat them on every row.
     try w.print("<tr data-s=\"{s}\" data-k=\"{s}\"><td title=\"", .{ @tagName(difference.severity), @tagName(difference.kind) });
     try writeEscaped(w, difference.key);
     try w.writeAll("\">");
@@ -229,14 +215,12 @@ fn row(w: *std.Io.Writer, difference: Difference) !void {
     try w.print("</td><td><b>{s}</b> {s}</td></tr>\n", .{ difference.severity.label(), difference.kind.label() });
 }
 
-// One side of a difference. A term with no value that only this side has reads "(present)".
 fn value(w: *std.Io.Writer, side: []const u8, text: []const u8, present: bool) !void {
     try w.print("<div class=\"{s}", .{side});
     if (text.len == 0) {
         try w.print(" none\">{s}</div>", .{if (present) "(present)" else "-"});
         return;
     }
-    // Long values are cut by the stylesheet; the tooltip keeps all of it.
     if (text.len > 40) {
         try w.writeAll("\" title=\"");
         try writeEscaped(w, text);
@@ -246,8 +230,6 @@ fn value(w: *std.Io.Writer, side: []const u8, text: []const u8, present: bool) !
     try w.writeAll("</div>");
 }
 
-/// Writes `text` safe for HTML text and quoted attributes alike: markup characters as entities,
-/// and control characters and bidirectional overrides as visible escapes (`\x1b`, `\u{202e}`).
 pub fn writeEscaped(w: *std.Io.Writer, text: []const u8) !void {
     var start: usize = 0;
     var i: usize = 0;
@@ -279,9 +261,6 @@ pub fn writeEscaped(w: *std.Io.Writer, text: []const u8) !void {
     try w.writeAll(text[start..]);
 }
 
-// A Content-Security-Policy that lets the browser run only this page's own style and script,
-// named by their SHA-256 digests, and fetch nothing at all: whatever a value from the files holds,
-// no other script, style, image, form, or connection can come of it.
 fn writePolicy(out: *std.Io.Writer, script: []const u8) !void {
     try out.writeAll("<meta http-equiv=\"Content-Security-Policy\" content=\"default-src 'none'; style-src 'sha256-");
     try writeDigest(out, CSS);
@@ -297,7 +276,6 @@ fn writeDigest(out: *std.Io.Writer, text: []const u8) !void {
     try out.writeAll(std.base64.standard.Encoder.encode(&encoded, &digest));
 }
 
-// The tooltip tables the script reads: severity and kind meanings, keyed by their tags.
 fn writeMeanings(out: *std.Io.Writer) !void {
     try out.writeAll("var MEANING={");
     inline for (.{ Severity.critical, Severity.major, Severity.minor }) |severity| {
